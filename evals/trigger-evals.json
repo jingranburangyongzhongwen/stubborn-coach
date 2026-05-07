@@ -1,0 +1,23 @@
+[
+  { "prompt": "学习 transformer attention", "expected_skill": "study" },
+  { "prompt": "教我 quantum entanglement", "expected_skill": "study" },
+  { "prompt": "teach me how attention works", "expected_skill": "study" },
+  { "prompt": "I want to learn about kubernetes networking", "expected_skill": "study" },
+  { "prompt": "帮我理解这个 PDF /papers/attention.pdf", "expected_skill": "study" },
+  { "prompt": "读一下这个 URL https://example.com/article", "expected_skill": "study" },
+  { "prompt": "复习一下", "expected_skill": "study" },
+  { "prompt": "到期复习", "expected_skill": "study" },
+  { "prompt": "review my notes", "expected_skill": "study" },
+  { "prompt": "考考我", "expected_skill": "study" },
+  { "prompt": "小测一下", "expected_skill": "study" },
+  { "prompt": "quiz me on attention", "expected_skill": "study" },
+  { "prompt": "我学得怎么样", "expected_skill": "study" },
+  { "prompt": "现在到哪了", "expected_skill": "study" },
+  { "prompt": "how am I doing with this topic", "expected_skill": "study" },
+  { "prompt": "这句话来自哪里", "expected_skill": "study" },
+  { "prompt": "这个结论的来源是什么", "expected_skill": "study" },
+  { "prompt": "在 wiki 找 attention", "expected_skill": "study" },
+  { "prompt": "X 是什么 意思", "expected_skill": "study" },
+  { "prompt": "导出报告", "expected_skill": "study" },
+  { "prompt": "总结一下我的学习", "expected_skill": "study" }
+]

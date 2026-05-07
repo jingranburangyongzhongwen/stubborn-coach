@@ -1,0 +1,10 @@
+{
+  "name": "stubborn-coach",
+  "description": "Markdown-first learning mentor for Claude Code",
+  "version": "0.1.0",
+  "author": {
+    "name": "kfl"
+  },
+  "license": "MIT",
+  "keywords": ["learning", "mentor", "markdown", "wiki", "study"]
+}

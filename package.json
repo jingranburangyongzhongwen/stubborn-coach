@@ -1,0 +1,9 @@
+{
+  "name": "stubborn-coach",
+  "version": "0.1.0",
+  "private": true,
+  "description": "Runtime deps for stubborn-coach CLI (PDF text extraction).",
+  "dependencies": {
+    "pdf-parse": "^1.1.1"
+  }
+}

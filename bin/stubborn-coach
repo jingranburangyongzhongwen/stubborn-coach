@@ -1,0 +1,567 @@
+#!/usr/bin/env node
+const fs = require('fs');
+const path = require('path');
+const { ensureWikiDirs, PLUGIN_ROOT, resolveWorkspacePath } = require('./lib/paths');
+const { localDate } = require('./lib/date');
+const { extractPdf, saveExtracted, mergeExtracted } = require('./lib/pdf-cli');
+
+function jsonOut(payload, exitCode = 0) {
+  process.stdout.write(`${JSON.stringify(payload)}\n`);
+  process.exit(exitCode);
+}
+
+function commandError(command, error) {
+  return {
+    ok: false,
+    command,
+    error: {
+      code: error.code || 'ERROR',
+      message: error.message,
+      details: error.details || {},
+    },
+  };
+}
+
+const HELP = {
+  global: {
+    usage: 'stubborn-coach <command>',
+    commands: ['init'],
+    notes: [
+      'stubborn-coach manages learning-wiki/study.md and learning-wiki/.study-state.yml.',
+      'All learning state is owned by the study skill (LLM main flow). Hidden writer commands are not public API.',
+    ],
+  },
+  init: {
+    usage: 'stubborn-coach init',
+    description: 'Create learning-wiki/study.md and learning-wiki/.study-state.yml in the current workspace if missing. Idempotent.',
+  },
+};
+
+function hasHelpArg(args) {
+  return args.includes('--help') || args.includes('-h');
+}
+
+function helpPayload(topic) {
+  return {
+    ok: true,
+    command: 'help',
+    topic: topic || null,
+    ...(HELP[topic] || HELP.global),
+  };
+}
+
+function codedError(code, message, details = {}) {
+  const error = new Error(message);
+  error.code = code;
+  error.details = details;
+  return error;
+}
+
+function workspaceFiles(root = process.cwd()) {
+  return {
+    studyPath: path.join(root, 'learning-wiki', 'study.md'),
+    statePath: path.join(root, 'learning-wiki', '.study-state.yml'),
+  };
+}
+
+function relativeTo(root, filePath) {
+  return path.relative(root, filePath);
+}
+
+function normalizeWithTrailingNewline(value) {
+  const text = String(value || '');
+  return text.endsWith('\n') ? text : `${text}\n`;
+}
+
+function ensureStudyExists(studyPath) {
+  if (!fs.existsSync(studyPath)) {
+    throw codedError('STUDY_MD_MISSING', '`learning-wiki/study.md` is missing; run `stubborn-coach init` first');
+  }
+}
+
+function hasAnchor(value) {
+  return /<!--\s*(?:topic:|node:|mistakes:)/.test(value);
+}
+
+function assertNoAnchor(value) {
+  if (hasAnchor(value)) {
+    throw codedError('INVALID_STDIN', 'stdin must not contain stubborn-coach comment anchors');
+  }
+}
+
+function assertKebabId(value, label) {
+  if (!/^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value || '')) {
+    throw codedError('INVALID_ARGS', `${label} must be kebab-case`);
+  }
+}
+
+function assertSmallInt(value, label) {
+  if (!/^(?:[1-9]|[1-9][0-9])$/.test(String(value || ''))) {
+    throw codedError('INVALID_ARGS', `${label} must be an integer from 1 to 99`);
+  }
+}
+
+function parseArgs(args) {
+  const parsed = {};
+  for (let index = 0; index < args.length; index += 2) {
+    const key = args[index];
+    const value = args[index + 1];
+    if (!/^--[a-z-]+$/.test(key || '') || !value || parsed[key] !== undefined) {
+      throw codedError('INVALID_ARGS', 'arguments must be unique flag/value pairs');
+    }
+    parsed[key] = value;
+  }
+  return parsed;
+}
+
+function requireOnlyArgs(parsed, allowed) {
+  const keys = Object.keys(parsed).sort();
+  const expected = [...allowed].sort();
+  if (keys.join(',') !== expected.join(',')) {
+    throw codedError('INVALID_ARGS', `expected arguments: ${expected.join(' ')}`);
+  }
+}
+
+function extractTopicIds(yaml) {
+  const text = String(yaml || '');
+  const lines = text.split(/\r?\n/);
+  const topicLine = lines.findIndex((line) => /^topics:\s*(?:\[\s*\])?\s*$/.test(line));
+  if (topicLine < 0) return null;
+  if (/^topics:\s*\[\s*\]\s*$/.test(lines[topicLine])) return [];
+  const blockLines = [];
+  for (let index = topicLine + 1; index < lines.length; index += 1) {
+    const line = lines[index];
+    if (/^[A-Za-z_][A-Za-z0-9_-]*:\s*/.test(line)) break;
+    blockLines.push(line);
+  }
+  const block = blockLines.join('\n');
+  const ids = [];
+  for (const match of block.matchAll(/^\s*-\s+id:\s*["']?([a-z0-9]+(?:-[a-z0-9]+)*)["']?\s*$/gm)) {
+    ids.push(match[1]);
+  }
+  return ids;
+}
+
+const Y_INT = /^["']?(\d+)["']?$/;
+const Y_BOOL = /^["']?(true|false|yes|no|on|off)["']?$/i;
+const yInt = (raw) => { const m = String(raw).trim().match(Y_INT); return m ? Number(m[1]) : null; };
+const yBool = (raw) => { const m = String(raw).trim().match(Y_BOOL); return m ? /^(t|y|on)/i.test(m[1]) : null; };
+
+function parseTopicsForInvariant(yaml) {
+  const lines = String(yaml || '').split(/\r?\n/);
+  const topicsLine = lines.findIndex((line) => /^topics:\s*(?:\[\s*\])?\s*$/.test(line));
+  if (topicsLine < 0 || /^topics:\s*\[\s*\]\s*$/.test(lines[topicsLine])) return [];
+
+  const topics = [];
+  let topic = null;
+  let inMap = false;
+  let node = null;
+
+  const closeNode = () => { if (node && topic) topic.nodes.push(node); node = null; };
+  const closeTopic = () => { closeNode(); if (topic) topics.push(topic); topic = null; inMap = false; };
+
+  const setField = (target, key, raw) => {
+    if (key === 'idx' || key === 'current_node_idx') {
+      const v = yInt(raw); if (v !== null) target[key] = v;
+    } else if (key === 'done') {
+      const v = yBool(raw); if (v !== null) target.done = v;
+    }
+  };
+
+  for (let i = topicsLine + 1; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (/^[A-Za-z_]/.test(line)) { closeTopic(); break; }
+
+    const topicHead = line.match(/^ {2}- id:\s*(.+?)\s*$/);
+    if (topicHead) {
+      closeTopic();
+      const id = topicHead[1].replace(/^["'](.*)["']$/, '$1');
+      topic = { id, current_node_idx: null, nodes: [] };
+      continue;
+    }
+    if (!topic) continue;
+
+    const topicField = line.match(/^ {4}(current_node_idx):\s*(.+?)\s*$/);
+    if (topicField) { setField(topic, topicField[1], topicField[2]); continue; }
+
+    if (/^ {4}map:\s*$/.test(line)) { inMap = true; continue; }
+    if (inMap && /^ {4}[A-Za-z_]/.test(line)) { closeNode(); inMap = false; }
+    if (!inMap) continue;
+
+    const nodeHead = line.match(/^ {6}- (idx|done):\s*(.*)$/);
+    if (nodeHead) { closeNode(); node = { idx: null, done: false }; setField(node, nodeHead[1], nodeHead[2]); continue; }
+    const nodeField = line.match(/^ {8}(idx|done):\s*(.+?)\s*$/);
+    if (nodeField && node) setField(node, nodeField[1], nodeField[2]);
+  }
+  closeTopic();
+  return topics;
+}
+
+function assertNodeProgression(yaml) {
+  const topics = parseTopicsForInvariant(yaml);
+  for (const topic of topics) {
+    if (topic.current_node_idx == null || topic.nodes.length === 0) continue;
+    const sorted = [...topic.nodes].filter((n) => n.idx != null).sort((a, b) => a.idx - b.idx);
+    if (sorted.length === 0) continue;
+    const trueCount = sorted.filter((n) => n.done).length;
+    for (let i = 0; i < sorted.length; i += 1) {
+      const expected = i < trueCount;
+      if (sorted[i].done !== expected) {
+        throw codedError(
+          'STATE_NODE_DONE_NOT_PREFIX',
+          `topic ${topic.id}: map[].done must be a true-prefix (all true nodes come before all false ones)`,
+          { topic: topic.id },
+        );
+      }
+    }
+    if (topic.current_node_idx !== trueCount + 1) {
+      throw codedError(
+        'STATE_NODE_IDX_MISMATCH',
+        `topic ${topic.id}: current_node_idx must equal (done-true count) + 1`,
+        { topic: topic.id, expected: trueCount + 1, actual: topic.current_node_idx },
+      );
+    }
+  }
+}
+
+function normalizeStateYaml(value) {
+  const text = String(value || '');
+  if (!text.trim()) throw codedError('EMPTY_STDIN', 'write-state requires YAML content on stdin');
+  if (/^#/m.test(text)) throw codedError('INVALID_STATE_YAML', 'state YAML must not contain markdown headings');
+  const typeLine = text.match(/^type:\s*(.+?)\s*$/m);
+  if (typeLine && !/^["']?study-log["']?$/.test(typeLine[1])) {
+    throw codedError('INVALID_STATE_YAML', 'state YAML type must be `study-log`');
+  }
+  return typeLine ? text : `type: study-log\n${text}`;
+}
+
+function assertValidStateYaml(value) {
+  const text = normalizeStateYaml(value);
+  if (extractTopicIds(text) === null) {
+    throw codedError('INVALID_STATE_YAML', 'state YAML must contain `topics`');
+  }
+  assertNodeProgression(text);
+  return { text };
+}
+
+function firstLine(value) {
+  return String(value || '').split(/\r?\n/, 1)[0] || '';
+}
+
+function init() {
+  const root = process.cwd();
+  ensureWikiDirs(root);
+  const { studyPath, statePath } = workspaceFiles(root);
+  const written = [];
+  const updated = [];
+  if (fs.existsSync(studyPath) && !fs.existsSync(statePath) && firstLine(fs.readFileSync(studyPath, 'utf8')) === '---') {
+    throw codedError('LEGACY_STUDY_MD', 'legacy study.md with frontmatter detected; back it up and remove it before running init');
+  }
+  if (!fs.existsSync(studyPath)) {
+    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study.md');
+    const content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
+    fs.writeFileSync(studyPath, content);
+    written.push(relativeTo(root, studyPath));
+  } else {
+    updated.push(relativeTo(root, studyPath));
+  }
+  if (!fs.existsSync(statePath)) {
+    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study-state.yml');
+    let content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
+    content = content.replace(/^generated_at:.*$/m, `generated_at: ${localDate()}`);
+    fs.writeFileSync(statePath, content);
+    written.push(relativeTo(root, statePath));
+  } else {
+    updated.push(relativeTo(root, statePath));
+  }
+  return { written, updated };
+}
+
+function writeState(content = '') {
+  const root = process.cwd();
+  ensureWikiDirs(root);
+  const statePath = resolveWorkspacePath('learning-wiki/.study-state.yml', { cwd: root, allowSourceFiles: false });
+  const { text } = assertValidStateYaml(content);
+  const normalized = normalizeWithTrailingNewline(text);
+  fs.writeFileSync(statePath, normalized, 'utf8');
+  return {
+    written: [path.join('learning-wiki', '.study-state.yml')],
+    bytes: Buffer.byteLength(normalized, 'utf8'),
+  };
+}
+
+function appendBlockAtEnd(content, block) {
+  const separator = content.endsWith('\n') ? '\n' : '\n\n';
+  return `${content}${separator}${block.trimEnd()}\n`;
+}
+
+function insertBlockAt(content, index, block) {
+  const before = content.slice(0, index);
+  const after = content.slice(index);
+  const prefix = before.endsWith('\n') ? '\n' : '\n\n';
+  const suffix = after && !after.startsWith('\n') ? '\n' : '';
+  return `${before}${prefix}${block.trimEnd()}\n${suffix}${after}`;
+}
+
+function insertLinesAt(content, index, lines) {
+  const before = content.slice(0, index);
+  const after = content.slice(index);
+  const prefix = before.endsWith('\n') ? '' : '\n';
+  const suffix = after && !after.startsWith('\n') ? '\n' : '';
+  return `${before}${prefix}${lines.trimEnd()}\n${suffix}${after}`;
+}
+
+function readStudy(root) {
+  const studyPath = resolveWorkspacePath('learning-wiki/study.md', { cwd: root, allowSourceFiles: false });
+  ensureStudyExists(studyPath);
+  return { studyPath, content: fs.readFileSync(studyPath, 'utf8') };
+}
+
+function findTopicBounds(content, topic) {
+  const anchor = `<!-- topic:${topic} -->`;
+  const start = content.indexOf(anchor);
+  if (start < 0) throw codedError('TOPIC_NOT_FOUND', `topic not found: ${topic}`);
+  const next = content.indexOf('\n<!-- topic:', start + anchor.length);
+  return { start, end: next < 0 ? content.length : next };
+}
+
+function topicSlice(content, bounds) {
+  return content.slice(bounds.start, bounds.end);
+}
+
+function maxNodeIdx(slice) {
+  let max = 0;
+  for (const match of slice.matchAll(/<!-- node:(\d+) -->/g)) {
+    max = Math.max(max, Number(match[1]));
+  }
+  return max;
+}
+
+function findNodeBounds(content, topic, node) {
+  const topicBounds = findTopicBounds(content, topic);
+  const slice = topicSlice(content, topicBounds);
+  const anchor = `<!-- node:${node} -->`;
+  const nodeStartLocal = slice.indexOf(anchor);
+  if (nodeStartLocal < 0) throw codedError('NODE_NOT_FOUND', `node not found: ${topic}/${node}`);
+  const nextNodeLocal = slice.indexOf('\n<!-- node:', nodeStartLocal + anchor.length);
+  const nodeEndLocal = nextNodeLocal < 0 ? slice.length : nextNodeLocal;
+  return {
+    start: topicBounds.start + nodeStartLocal,
+    end: topicBounds.start + nodeEndLocal,
+  };
+}
+
+function injectNodeOneAnchor(value) {
+  const text = normalizeWithTrailingNewline(value);
+  const nodeHeader = text.match(/^##### 1\. .+$/m);
+  if (!nodeHeader) {
+    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must include node 1 lecture headed by `##### 1. ...`');
+  }
+  const before = text.slice(0, nodeHeader.index);
+  const after = text.slice(nodeHeader.index);
+  const prefix = before.endsWith('\n') ? '' : '\n';
+  return `${before}${prefix}<!-- node:1 -->\n${after}`;
+}
+
+function addTopic(args, content = '') {
+  const root = process.cwd();
+  const parsed = parseArgs(args);
+  requireOnlyArgs(parsed, ['--id']);
+  const id = parsed['--id'];
+  assertKebabId(id, '--id');
+  const value = String(content || '');
+  if (!value.trim()) throw codedError('EMPTY_STDIN', 'add-topic requires markdown content on stdin');
+  if (!/^### /m.test(value) || !value.trimStart().startsWith('### ')) {
+    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must start with `### `');
+  }
+  if (/^# /m.test(value)) throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must not contain an H1 heading');
+  assertNoAnchor(value);
+
+  const { studyPath, content: current } = readStudy(root);
+  if (current.includes(`<!-- topic:${id} -->`)) {
+    throw codedError('TOPIC_EXISTS', `topic already exists: ${id}`);
+  }
+  const withNodeAnchor = injectNodeOneAnchor(value);
+  const normalized = appendBlockAtEnd(current, `<!-- topic:${id} -->\n${withNodeAnchor}`);
+  fs.writeFileSync(studyPath, normalized, 'utf8');
+  return {
+    written: [path.join('learning-wiki', 'study.md')],
+    bytes: Buffer.byteLength(normalized, 'utf8'),
+  };
+}
+
+function readStateTopicsOrThrow(root) {
+  const statePath = path.join(root, 'learning-wiki', '.study-state.yml');
+  if (!fs.existsSync(statePath)) {
+    throw codedError('STATE_MISSING', '`learning-wiki/.study-state.yml` is missing; run `stubborn-coach init` and `write-state` first');
+  }
+  return parseTopicsForInvariant(fs.readFileSync(statePath, 'utf8'));
+}
+
+function assertPrevNodeDone(root, topicId, idx) {
+  const topic = readStateTopicsOrThrow(root).find((t) => t.id === topicId);
+  if (!topic) {
+    throw codedError('STATE_TOPIC_NOT_FOUND', `topic ${topicId} not in state.yml; write-state must run before add-node`, { topic: topicId });
+  }
+  const prev = topic.nodes.find((n) => n.idx === idx - 1);
+  if (!prev || !prev.done) {
+    throw codedError(
+      'NODE_PREREQUISITE_NOT_DONE',
+      `add-node --idx ${idx} requires done[${idx - 1}]=true in state.yml; only call add-node from P1 after a passing probe lands write-state with done[${idx - 1}]=true and current_node_idx=${idx}`,
+      { topic: topicId, expected_done: idx - 1 },
+    );
+  }
+}
+
+function addNode(args, content = '') {
+  const root = process.cwd();
+  const parsed = parseArgs(args);
+  requireOnlyArgs(parsed, ['--topic', '--idx']);
+  const topic = parsed['--topic'];
+  const idx = Number(parsed['--idx']);
+  assertKebabId(topic, '--topic');
+  assertSmallInt(parsed['--idx'], '--idx');
+  const value = String(content || '');
+  if (!value.trim()) throw codedError('EMPTY_STDIN', 'add-node requires markdown content on stdin');
+  if (!value.trimStart().startsWith(`##### ${idx}. `)) {
+    throw codedError('INVALID_NODE_STDIN', `add-node stdin must start with \`##### ${idx}. \``);
+  }
+  assertNoAnchor(value);
+
+  const { studyPath, content: current } = readStudy(root);
+  const bounds = findTopicBounds(current, topic);
+  const slice = topicSlice(current, bounds);
+  if (slice.includes(`<!-- node:${idx} -->`)) {
+    throw codedError('NODE_EXISTS', `node already exists: ${topic}/${idx}`);
+  }
+  const max = maxNodeIdx(slice);
+  if (max !== idx - 1) {
+    throw codedError('NODE_IDX_MISMATCH', `node idx must be ${max + 1}`, { expected: max + 1, actual: idx });
+  }
+  assertPrevNodeDone(root, topic, idx);
+  const normalized = insertBlockAt(current, bounds.end, `<!-- node:${idx} -->\n${normalizeWithTrailingNewline(value)}`);
+  fs.writeFileSync(studyPath, normalized, 'utf8');
+  return {
+    written: [path.join('learning-wiki', 'study.md')],
+    bytes: Buffer.byteLength(normalized, 'utf8'),
+  };
+}
+
+function addMistake(args, content = '') {
+  const root = process.cwd();
+  const parsed = parseArgs(args);
+  requireOnlyArgs(parsed, ['--topic', '--node']);
+  const topic = parsed['--topic'];
+  const node = Number(parsed['--node']);
+  assertKebabId(topic, '--topic');
+  assertSmallInt(parsed['--node'], '--node');
+  const value = String(content || '');
+  const lines = value.trimEnd().split(/\r?\n/).filter((line) => line.length > 0);
+  if (!lines.length) throw codedError('EMPTY_STDIN', 'add-mistake requires markdown list items on stdin');
+  if (!lines.every((line) => /^- /.test(line))) {
+    throw codedError('INVALID_MISTAKE_STDIN', 'add-mistake stdin lines must all start with `- `');
+  }
+  assertNoAnchor(value);
+
+  const { studyPath, content: current } = readStudy(root);
+  const nodeBounds = findNodeBounds(current, topic, node);
+  const nodeSlice = current.slice(nodeBounds.start, nodeBounds.end);
+  const mistakeAnchor = `<!-- mistakes:${topic}/${node} -->`;
+  const mistakeStartLocal = nodeSlice.indexOf(mistakeAnchor);
+  const normalized = mistakeStartLocal < 0
+    ? insertBlockAt(current, nodeBounds.end, `${mistakeAnchor}\n###### 错题\n${lines.join('\n')}`)
+    : insertLinesAt(current, nodeBounds.end, lines.join('\n'));
+  fs.writeFileSync(studyPath, normalized, 'utf8');
+  return {
+    written: [path.join('learning-wiki', 'study.md')],
+    bytes: Buffer.byteLength(normalized, 'utf8'),
+  };
+}
+
+function main() {
+  const [command, ...args] = process.argv.slice(2);
+  try {
+    if (!command || ['-h', '--help'].includes(command)) {
+      jsonOut(helpPayload());
+    }
+
+    if (command === 'help') {
+      jsonOut(helpPayload(args[0]));
+    }
+
+    if (command === 'init') {
+      if (hasHelpArg(args)) jsonOut(helpPayload('init'));
+      const result = init();
+      jsonOut({ ok: true, command, written: result.written, updated: result.updated, warnings: [] });
+    }
+
+    if (command === 'write-state') {
+      const input = fs.readFileSync(0, 'utf8');
+      const result = writeState(input);
+      jsonOut({ ok: true, command, written: result.written, bytes: result.bytes, warnings: [] });
+    }
+
+    if (command === 'add-topic') {
+      const input = fs.readFileSync(0, 'utf8');
+      const result = addTopic(args, input);
+      jsonOut({ ok: true, command, written: result.written, bytes: result.bytes, warnings: [] });
+    }
+
+    if (command === 'add-node') {
+      const input = fs.readFileSync(0, 'utf8');
+      const result = addNode(args, input);
+      jsonOut({ ok: true, command, written: result.written, bytes: result.bytes, warnings: [] });
+    }
+
+    if (command === 'add-mistake') {
+      const input = fs.readFileSync(0, 'utf8');
+      const result = addMistake(args, input);
+      jsonOut({ ok: true, command, written: result.written, bytes: result.bytes, warnings: [] });
+    }
+
+    if (command === 'extract-pdf') {
+      const parsed = parseArgs(args);
+      requireOnlyArgs(parsed, ['--name']);
+      const input = fs.readFileSync(0, 'utf8');
+      extractPdf({ name: parsed['--name'] }, input)
+        .then((result) => jsonOut({ command, ...result }))
+        .catch((error) => jsonOut(commandError(command, error), 1));
+      return;
+    }
+
+    if (command === 'save-extracted') {
+      const parsed = parseArgs(args);
+      requireOnlyArgs(parsed, ['--name', '--part']);
+      const input = fs.readFileSync(0, 'utf8');
+      const result = saveExtracted({ name: parsed['--name'], part: parsed['--part'] }, input);
+      jsonOut({ command, ...result });
+    }
+
+    if (command === 'merge-extracted') {
+      const parsed = parseArgs(args);
+      requireOnlyArgs(parsed, ['--name']);
+      const result = mergeExtracted({ name: parsed['--name'] });
+      jsonOut({ command, ...result });
+    }
+
+    const error = new Error(`unknown command: ${command}`);
+    error.code = 'UNKNOWN_COMMAND';
+    error.details = { hint: 'Only public `init` is supported. Run `stubborn-coach help` to see usage.' };
+    throw error;
+  } catch (error) {
+    jsonOut(commandError(command || 'unknown', error), 1);
+  }
+}
+
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  addMistake,
+  addNode,
+  addTopic,
+  init,
+  main,
+  writeState,
+};

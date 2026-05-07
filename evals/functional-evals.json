@@ -1,0 +1,54 @@
+[
+  {
+    "name": "init creates study markdown and state yaml",
+    "command": "init",
+    "expect": ["learning-wiki/study.md", "learning-wiki/.study-state.yml"]
+  },
+  {
+    "name": "init does not create legacy subdirs",
+    "command": "init",
+    "expect_missing": ["learning-wiki/sources", "learning-wiki/knowledge", "learning-wiki/sessions", "learning-wiki/reviews"]
+  },
+  {
+    "name": "removed write-source command is rejected",
+    "command": "write-source",
+    "input": { "source_kind": "topic", "title": "Attention" },
+    "expect_ok": false
+  },
+  {
+    "name": "removed write-mastery-result command is rejected",
+    "command": "write-mastery-result",
+    "input": { "idempotency_key": "x" },
+    "expect_ok": false
+  },
+  {
+    "name": "removed validate command is rejected",
+    "command": "validate",
+    "expect_ok": false
+  },
+  {
+    "name": "path guard rejects writes outside study.md",
+    "hook": { "tool_name": "Write", "tool_input": { "file_path": "learning-wiki/knowledge/foo.md", "content": "bad" } },
+    "expect_exit": 2
+  },
+  {
+    "name": "path guard rejects forbidden bash subcommand",
+    "hook": { "tool_name": "Bash", "tool_input": { "command": "stubborn-coach write-source" } },
+    "expect_exit": 2
+  },
+  {
+    "name": "path guard allows stubborn-coach init",
+    "hook": { "tool_name": "Bash", "tool_input": { "command": "stubborn-coach init" } },
+    "expect_exit": 0
+  },
+  {
+    "name": "path guard allows hidden write-state heredoc",
+    "hook": { "tool_name": "Bash", "tool_input": { "command": "stubborn-coach write-state <<'STATE'\ntype: study-log\ntopics: []\nSTATE" } },
+    "expect_exit": 0
+  },
+  {
+    "name": "path guard allows hidden add-topic heredoc with args",
+    "hook": { "tool_name": "Bash", "tool_input": { "command": "stubborn-coach add-topic --id attention <<'TOPIC'\n### Attention\n#### 节点讲义\n##### 1. Query Key Value\nTOPIC" } },
+    "expect_exit": 0
+  }
+]
