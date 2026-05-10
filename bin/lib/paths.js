@@ -1,6 +1,7 @@
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const { localDate } = require('./date');
 
 const PLUGIN_ROOT = path.resolve(__dirname, '..', '..');
 // Only the learning wiki files plus an optional user upload area are writable.
@@ -125,9 +126,11 @@ function ensureWithinWorkspaceForRead(rawPath, options = {}) {
 }
 
 // Strip an optional `cd <path> &&` prefix that Cursor / Claude Code prepend before running tools.
+// Accepts an optional `/d` (or similar) flag because some LLMs emit cmd.exe-style `cd /d` by
+// reflex on Windows. The flag is noise to bash, but silently swallow it instead of blocking.
 // The path may be quoted (single or double) or unquoted; `..` traversal is rejected.
 function stripCdPrefix(value) {
-  const cdMatch = value.match(/^cd\s+(?:"([^"]+)"|'([^']+)'|(\S+))\s*&&\s*([\s\S]+)$/i);
+  const cdMatch = value.match(/^cd\s+(?:\/[a-z]\s+)?(?:"([^"]+)"|'([^']+)'|(\S+))\s*&&\s*([\s\S]+)$/i);
   if (!cdMatch) return { rest: value, cdPath: null };
   const cdPath = cdMatch[1] ?? cdMatch[2] ?? cdMatch[3];
   if (!cdPath) {
@@ -139,8 +142,8 @@ function stripCdPrefix(value) {
   return { rest: cdMatch[4].trim(), cdPath };
 }
 
-const HIDDEN_HEREDOC_COMMANDS = new Set(['write-state', 'add-topic', 'add-node', 'add-mistake', 'save-extracted', 'extract-pdf']);
-const HIDDEN_NO_STDIN_COMMANDS = new Set(['merge-extracted']);
+const HIDDEN_HEREDOC_COMMANDS = new Set(['write-state', 'add-topic', 'add-node', 'add-mistake', 'extract-source']);
+const HIDDEN_NO_STDIN_COMMANDS = new Set(['compute-sm2']);
 const KEBAB_RE = /^[a-z0-9]+(?:-[a-z0-9]+)*$/;
 const BASENAME_RE = /^[A-Za-z0-9_-][A-Za-z0-9._-]*$/;
 
@@ -204,14 +207,31 @@ function assertPart3(value, flag, originalCommand) {
   }
 }
 
+function assertQuality(value, flag, originalCommand) {
+  if (!/^[0-5]$/.test(String(value || ''))) {
+    throw codedError('BASH_ARGS_INVALID', `${flag} must be an integer from 0 to 5`, { command: originalCommand });
+  }
+}
+
+function assertDateYmd(value, flag, originalCommand) {
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(String(value || ''))) {
+    throw codedError('BASH_ARGS_INVALID', `${flag} must be YYYY-MM-DD`, { command: originalCommand });
+  }
+}
+
+function assertNonNegNum(value, flag, originalCommand) {
+  if (!/^\d+(\.\d+)?$/.test(String(value || ''))) {
+    throw codedError('BASH_ARGS_INVALID', `${flag} must be a non-negative number`, { command: originalCommand });
+  }
+}
+
 const COMMAND_SPECS = {
   'write-state':     { keys: '',                    usage: '`write-state` does not accept arguments',                              validators: {} },
   'add-topic':       { keys: '--id',                usage: '`add-topic` only accepts `--id <kebab>`',                              validators: { '--id':    assertKebab } },
   'add-node':        { keys: '--idx,--topic',       usage: '`add-node` only accepts `--topic <kebab> --idx <1-99>`',               validators: { '--topic': assertKebab, '--idx':  assertSmallInt } },
   'add-mistake':     { keys: '--node,--topic',      usage: '`add-mistake` only accepts `--topic <kebab> --node <1-99>`',           validators: { '--topic': assertKebab, '--node': assertSmallInt } },
-  'save-extracted':  { keys: '--name,--part',       usage: '`save-extracted` only accepts `--name <basename> --part <1-999>`',     validators: { '--name':  assertBasename, '--part': assertPart3 } },
-  'extract-pdf':     { keys: '--name',              usage: '`extract-pdf` only accepts `--name <basename>` (PDF path on stdin)',   validators: { '--name':  assertBasename } },
-  'merge-extracted': { keys: '--name',              usage: '`merge-extracted` only accepts `--name <basename>`',                   validators: { '--name':  assertBasename } },
+  'extract-source':  { keys: '--name',              usage: '`extract-source` only accepts `--name <basename>` (path or URL on stdin)', validators: { '--name':  assertBasename } },
+  'compute-sm2':     { keys: '--ease,--interval,--quality,--reps,--today', usage: '`compute-sm2` requires `--quality <0-5> --ease <num> --interval <int> --reps <int> --today <YYYY-MM-DD>`', validators: { '--quality': assertQuality, '--ease': assertNonNegNum, '--interval': assertNonNegNum, '--reps': assertNonNegNum, '--today': assertDateYmd } },
 };
 
 function validateAddCommandArgs(name, argsPart, originalCommand) {
@@ -234,7 +254,12 @@ function validateHeredocSubcommand(rest, originalCommand) {
   const name = heredoc[1];
   if (!HIDDEN_HEREDOC_COMMANDS.has(name)) return false;
 
-  validateAddCommandArgs(name, heredoc[2], originalCommand);
+  // Strip shell quotes (e.g. --id "foo-bar" → --id foo-bar) so parseFlagPairs
+  // only sees bare tokens.  The regex captures the raw characters between the
+  // command name and the `<<` delimiter, which may include wrapping quotes that
+  // Bash would have removed before execution.
+  const argsPart = (heredoc[2] || '').replace(/"([^"]*)"/g, '$1').replace(/'([^']*)'/g, '$1');
+  validateAddCommandArgs(name, argsPart, originalCommand);
   const delimiter = heredoc[4];
   const body = heredoc[5];
   if (delimiter === undefined) return true;
@@ -253,7 +278,7 @@ function validateHeredocSubcommand(rest, originalCommand) {
 }
 
 function validateNoStdinSubcommand(rest, originalCommand) {
-  const match = rest.match(/^stubborn-coach\s+([a-z-]+)\s*([^\n]*)$/);
+  const match = rest.match(/^stubborn-coach\s+([a-z0-9-]+)\s*([^\n]*)$/);
   if (!match) return false;
   const name = match[1];
   if (!HIDDEN_NO_STDIN_COMMANDS.has(name)) return false;
@@ -267,7 +292,10 @@ function validateBashCommand(command) {
   const { rest } = stripCdPrefix(value);
 
   if (!/^stubborn-coach(\s|$)/.test(rest)) {
-    throw codedError('BASH_NOT_ALLOWED', 'only Bash commands beginning with stubborn-coach (optionally prefixed by `cd <path> &&`) are allowed');
+    throw codedError(
+      'BASH_NOT_ALLOWED',
+      'only Bash commands beginning with stubborn-coach (optionally prefixed by `cd <path> &&`) are allowed. Read learning-wiki/study.md or .study-state.yml with the Read tool, not `cat` / `type` / `head` / `Get-Content`. Do not list / probe the workspace — `.study-state.yml` is the source of truth.',
+    );
   }
   if (validateHeredocSubcommand(rest, value)) {
     return true;
@@ -282,19 +310,12 @@ function validateBashCommand(command) {
   if (validateNoStdinSubcommand(rest, value)) {
     return true;
   }
-  // After stubborn-coach, only public `init` (with optional --help / -h) or whitelisted hidden commands are allowed.
+  // After stubborn-coach, only help or whitelisted hidden commands are allowed.
   const afterCmd = rest.replace(/^stubborn-coach\s*/, '').trim();
   if (afterCmd === '' || afterCmd === '-h' || afterCmd === '--help' || afterCmd === 'help') {
     return true;
   }
-  if (!/^init\b/.test(afterCmd)) {
-    throw codedError('BASH_SUBCOMMAND_NOT_ALLOWED', 'only `stubborn-coach init` and hidden writer commands (write-state / add-topic / add-node / add-mistake / extract-pdf / save-extracted / merge-extracted) are allowed', { command: value });
-  }
-  const initArgs = afterCmd.replace(/^init\s*/, '').trim();
-  if (initArgs && !/^(-h|--help)$/.test(initArgs)) {
-    throw codedError('BASH_SUBCOMMAND_NOT_ALLOWED', '`stubborn-coach init` does not accept extra arguments', { command: value });
-  }
-  return true;
+  throw codedError('BASH_SUBCOMMAND_NOT_ALLOWED', 'only hidden study commands (write-state / add-topic / add-node / add-mistake / extract-source / compute-sm2) are allowed. Initialization is automatic; do not run `stubborn-coach init`.', { command: value });
 }
 
 function ensureWikiDirs(cwd = process.cwd()) {
@@ -303,6 +324,54 @@ function ensureWikiDirs(cwd = process.cwd()) {
   for (const dir of ['learning-wiki', ALLOWED_SOURCE_FILES_DIR]) {
     fs.mkdirSync(path.join(root, dir), { recursive: true });
   }
+}
+
+function workspaceFiles(root = process.cwd()) {
+  return {
+    studyPath: path.join(root, 'learning-wiki', 'study.md'),
+    statePath: path.join(root, 'learning-wiki', '.study-state.yml'),
+  };
+}
+
+function relativeTo(root, filePath) {
+  return path.relative(root, filePath);
+}
+
+function firstLine(value) {
+  return String(value || '').split(/\r?\n/, 1)[0] || '';
+}
+
+function ensureInitialized(cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  ensureWikiDirs(root);
+  const { studyPath, statePath } = workspaceFiles(root);
+  const written = [];
+  const updated = [];
+
+  if (fs.existsSync(studyPath) && !fs.existsSync(statePath) && firstLine(fs.readFileSync(studyPath, 'utf8')) === '---') {
+    throw codedError('LEGACY_STUDY_MD', 'legacy study.md with frontmatter detected; back it up and remove it before auto-initialization');
+  }
+
+  if (!fs.existsSync(studyPath)) {
+    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study.md');
+    const content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
+    fs.writeFileSync(studyPath, content, 'utf8');
+    written.push(relativeTo(root, studyPath));
+  } else {
+    updated.push(relativeTo(root, studyPath));
+  }
+
+  if (!fs.existsSync(statePath)) {
+    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study-state.yml');
+    let content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
+    content = content.replace(/^generated_at:.*$/m, `generated_at: ${localDate()}`);
+    fs.writeFileSync(statePath, content, 'utf8');
+    written.push(relativeTo(root, statePath));
+  } else {
+    updated.push(relativeTo(root, statePath));
+  }
+
+  return { written, updated };
 }
 
 module.exports = {
@@ -314,6 +383,7 @@ module.exports = {
   canonicalPath,
   ensureWikiDirs,
   ensureWithinWorkspaceForRead,
+  ensureInitialized,
   isSubpath,
   isValidBasename,
   isValidPart3,

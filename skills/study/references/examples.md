@@ -1,11 +1,43 @@
-# 首轮输出示例
+# 教学循环规则与首轮输出示例
 
-主流程在执行 `study` 教学循环时必须满足 SKILL.md 的：
-1. **Step 0**：新 topic 先确认目标深度
-2. **教学输出契约**：学习地图 / 元控制提示 / 节点教学 / 节点出口提示
-3. **探查循环**：用户准备好后主流程内嵌探查，按 `references/probing.md` 判定过线
-4. **节点边界规则**：当前节点不展开后续节点概念
-5. **落盘约束**：只用隐藏 CLI `write-state` / `add-topic` / `add-node` / `add-mistake`，不要用 Write/Edit/MultiEdit
+## 教学循环规则
+
+### Step 0：深度问询
+
+新 topic 第一轮先确认目标深度，除非用户已写明"深入"、"彻底掌握"、`mastered`、`deep dive`：
+
+```text
+我会带你学 **{title}**。先确认一下深度（默认 familiar）：
+[F] familiar — 能用自己的话解释、识别常见误解就行
+[M] mastered — 还要能在新场景下推导/应用
+```
+
+**Step 0 轮边界**：深度问询是**独立一轮**，输出上面三行（可加一句对 source 的一句话概述）后立刻结束；**禁止**在同一轮追加学习地图、节点 1 正文或 `add-topic`。长 PDF / 长 URL 入口也适用——subagent 返回 `source_summary` 后本轮只走 Step 0。落盘在 Step 0 轮**不发生**（state 仍为自动初始化模板，`add-topic` 等用户回 F/M 后的"First-Round Output"轮才调）。
+
+### First-Round Output（Step 0 后的首轮）
+
+1. 学习地图 3-5 节点（mastered 偏 5 节点且含推导/应用节点）。
+2. 仅首轮出现元控制提示：`换个例子` / `检查一下` / `现在小测` / `暂停保存` / `回到节点 N` / `换主题 X`。
+3. 节点 1 教学正文，精简为主，复杂节点可适度延展。
+4. 固定节点出口提示：`这个节点先讲到这里。你可以继续追问这个节点；如果觉得差不多了，说"检查一下"，我会用一个短问答确认能不能进入下一节点。`
+5. 结束本轮，不追加菜单、数字选项、"等你回答"。
+
+创建 topic 时，state 必须写 `current_node_idx: 1`，且 `map[]` 每个节点都有本节点 `key_points`。节点 2 起只输出教学正文 + 同一条节点出口提示，不重复元控制提示。
+
+### 节点边界
+
+只讲当前节点 key_points；不展开后续节点才说得清的机制，只用一句 `（具体机制在节点 N 展开）` 预告。节点 1 宁少不超载，先建立最小可工作直觉。
+
+### Resume 开头固定
+
+> 上次你学到 **{progress}**，掌握了 [{confirmed key_points}]，留下了 [{misconceptions / gaps}]。
+> 你可以说：继续、回顾测一下、换个角度，或换主题。
+
+## 首轮输出示例
+
+主流程在执行 `study` 教学循环时必须满足上述规则，同时遵守：
+1. **探查循环**：用户准备好后主流程内嵌探查，按 `probing.md` 判定过线
+2. **落盘约束**：只用隐藏 CLI `write-state` / `add-topic` / `add-node` / `add-mistake`，不要用 Write/Edit/MultiEdit
 
 ## 示例 1：topic 入口
 
@@ -60,7 +92,31 @@ E=mc² 是一个等式，它告诉你三件事：
 这个节点先讲到这里。你可以继续追问这个节点；如果觉得差不多了，说"检查一下"，我会用一个短问答确认能不能进入下一节点。
 ```
 
-随后先用 `stubborn-coach write-state` 落 `.study-state.yml`，再用 `stubborn-coach add-topic --id e-mc2` 把主题骨架、学习地图和节点 1 讲义追加到 `study.md`，Bash 完成后直接结束本轮，不补充任何文字。state 中 `current_node_idx=1`，且每个 map 节点都有自己的 `key_points`：
+随后先用 `stubborn-coach write-state` 落 `.study-state.yml`，再用 `stubborn-coach add-topic --id e-mc2` 把主题骨架、学习地图和节点 1 讲义追加到 `study.md`，Bash 完成后直接结束本轮，不补充任何文字。`add-topic` 的 stdin 形态如下（**首行就是标题，纯文本不带 `#`**；section 用 `##`，节点用 `### N.`，CLI 会自动归一到 `### {title}` + `#### {section}` + `##### N.`）：
+
+```markdown
+质能方程 (E=mc²)
+
+## 学习目标
+- 能用自己的话解释 E=mc²
+
+## 学习地图
+- 1. 基本含义
+- 2. c² 量级
+- 3. 历史与起源
+- 4. 质量亏损与核反应
+
+## 节点讲义
+
+### 1. 基本含义
+E=mc² 是一个等式，它告诉你三件事：
+
+1. 等号两边是同一个物理量的两种表达——左边叫"能量"，右边叫"质量乘以光速平方"。
+2. 任何静止的物体本身就持有能量 E = mc²，不需要它运动也不需要它"做什么"才有能量。
+3. 因此 m 和 E 之间不存在"谁变成谁"，它们是同一本账上的两种记账方式，c² 只是单位换算系数。
+```
+
+state 中 `current_node_idx=1`，且每个 map 节点都有自己的 `key_points`：
 
 ```yaml
 current_node_idx: 1
@@ -102,7 +158,7 @@ map:
 检查一下
 ```
 
-主流程进入探查循环，按需读取 `references/probing.md`，先问一个高信息量问题：
+主流程进入探查循环，按需读取 `probing.md`，先问一个高信息量问题：
 
 ```
 检查一下节点 1。
@@ -243,7 +299,7 @@ budget:
 
 ### 反例 D：检查前就翻 done
 
-用户只是说"大概懂了"，主流程没有完成探查，却把节点 done 改成 true。错误：只有 `last_probe.scope.type=node && verdict=pass` 才能触发 `node_completed`。
+用户只是说"大概懂了"，主流程没有完成探查，却把节点 done 改成 true。错误：只有 `last_probe.scope.type=node && verdict=pass` 才能把 done 翻 true 并进入下一节点（见 `probing.md` P1）。
 
 ### 反例 E：普通答疑也落盘
 

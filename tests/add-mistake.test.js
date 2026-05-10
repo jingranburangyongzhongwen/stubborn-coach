@@ -3,6 +3,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
+const { ensureInitialized } = require('../bin/lib/paths');
 const { tempWorkspace } = require('./helpers');
 
 const CLI = path.join(__dirname, '..', 'bin', 'stubborn-coach');
@@ -12,7 +13,7 @@ function runCli(args, cwd, input = '') {
 }
 
 function initWithTopic(root) {
-  assert.equal(runCli(['init'], root).status, 0);
+  ensureInitialized(root);
   const topic = [
     '### 测试主题',
     '',

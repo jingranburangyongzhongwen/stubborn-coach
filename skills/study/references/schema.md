@@ -89,7 +89,7 @@ topics:
 | `topics[].citations` | 可选；只有 URL/PDF/文件/WebFetch 等外部来源事实进入 key_points 或讲义时写入，用于追溯来源 |
 | `topics[].misconceptions` | 每次 `last_probe.misconceptions` 追加去重；node/topic/review 都可写 |
 | `topics[].last_probe` | 探查每一轮（首问 / 补问 / 终态）都完整覆盖；非终态保留 `verdict: in_progress` + `evidence_ledger` + `current_question` 以便 T-Resume 接续；只保存结构化摘要，不保存完整问答转录 |
-| `topics[].next_review / interval_days / repetitions / ease_factor` | 仅完整 topic/review 探查后按 `references/sm2.md` 计算 |
+| `topics[].next_review / interval_days / repetitions / ease_factor` | 首次教学完成（未测验）时初始化为 `today+1 / 1 / 0 / 2.5`，`status: in_progress`；之后每次完整 topic / review 探查调 `compute-sm2` CLI 计算并覆盖这 4 个字段 + `status` |
 | `topics[].status` | topic/review 后按 quality 推断；node 验证保持 `in_progress`，除非全节点完成 |
 
 `write-state` 是全量覆盖。`type: study-log` 是固定常量，CLI 会在漏写时自动补到顶部，但会拒绝其它 `type` 值。CLI 还会做一条机械校验：
@@ -135,8 +135,27 @@ topics:
 ## 写入命令
 
 - `write-state`：从 stdin 接收完整 YAML，覆盖 `.study-state.yml`。
-- `add-topic --id <topic-id>`：从 stdin 接收单个 `### {标题}` 主题骨架，CLI 在文件末尾前置 `<!-- topic:{id} -->`，并在 `##### 1.` 前自动插入 `<!-- node:1 -->`。
-- `add-node --topic <topic-id> --idx <n>`：从 stdin 接收单个 `##### {n}. {标签}` 节点讲义，CLI 在该 topic 段尾追加 `<!-- node:{n} -->` + 内容，且 `n` 必须等于当前最大 node idx + 1。
+- `add-topic --id <topic-id>`：从 stdin 接收单个主题骨架。**首行就是标题**（纯文本，不要前缀 `#`，CLI 自己生成 `### {title}`）；后面跟 `学习目标` / `学习地图` / `节点讲义` 三个 section（`## ` 起头即可，CLI 会归一）和编号为 `1.` 的节点 1 讲义（`### 1. {label}` 起头即可，CLI 会归一到 `##### 1.`）。CLI 自动注入 `<!-- topic:{id} -->` 与 `<!-- node:1 -->`。
+
+  典型 stdin：
+
+  ```markdown
+  质能方程 (E=mc²)
+
+  ## 学习目标
+  - ...
+
+  ## 学习地图
+  - 1. 基本含义
+  - 2. 历史与起源
+
+  ## 节点讲义
+
+  ### 1. 基本含义
+  正文...
+  ```
+
+- `add-node --topic <topic-id> --idx <n>`：从 stdin 接收单个节点讲义。首个 heading 必须以 `{n}. {label}` 起头（n 须等于当前最大 node idx + 1），CLI 把它归一到 `##### {n}. {label}`。
 - `add-mistake --topic <topic-id> --node <n>`：从 stdin 接收一条或多条 `- {错题}`，CLI 在对应 node 的错题段尾追加；首次自动创建 `<!-- mistakes:{topic}/{n} -->` + `###### 错题`。
 
 主流程禁止调用 Write/Edit/MultiEdit 写这两个文件；只能通过上述隐藏 CLI 落盘。CLI 不做错题去重，LLM 在生成 stdin 前按字符串相等去重。

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const { resolveWorkspacePath, validateBashCommand } = require('../bin/lib/paths');
+const { ALLOWED_WIKI_FILES, canonicalPath, ensureInitialized, resolveWorkspacePath, validateBashCommand } = require('../bin/lib/paths');
 
 function readHookInput() {
   try {
@@ -63,6 +63,14 @@ function isInsidePluginRoot(filePath) {
   return rel && !rel.startsWith('..') && !path.isAbsolute(rel);
 }
 
+function isAllowedWikiRead(filePath, cwd = process.cwd()) {
+  const root = path.resolve(cwd);
+  const resolved = canonicalPath(path.isAbsolute(filePath) ? filePath : path.resolve(root, filePath));
+  return ALLOWED_WIKI_FILES
+    .map((allowed) => canonicalPath(path.join(root, allowed)))
+    .includes(resolved);
+}
+
 function main() {
   const input = readHookInput();
   const toolName = input.tool_name || input.tool || input.name || '';
@@ -90,6 +98,9 @@ function main() {
         }
       });
       if (allInWorkspace) {
+        if (paths.some((p) => isAllowedWikiRead(p))) {
+          ensureInitialized(process.cwd());
+        }
         allow('learning-wiki study files or source-files/** are on stubborn-coach read whitelist');
       }
       // 不属于插件 / workspace 的 Read（例如 ~/.claude memory、其它项目文件）：

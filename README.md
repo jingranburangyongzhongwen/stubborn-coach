@@ -39,8 +39,9 @@ claude plugins install https://github.com/jingranburangyongzhongwen/stubborn-coa
 /stubborn-coach:study
 ```
 
-首次运行 `init` 会在 workspace 下创建 `learning-wiki/` 和 `source-files/`，之后幂等。  
-PDF 处理首次会自动 `npm install pdf-parse` 到插件目录，用户无感知。
+首次读写学习文件时，插件会自动在 workspace 下创建 `learning-wiki/` 和 `source-files/`；不需要手动初始化。
+
+PDF 处理依赖外部 [docling](https://github.com/DS4SD/docling) CLI；插件**不会自动安装**——请按 docling 官方文档自行安装到合适的 Python 环境（通常用独立 venv / conda env），把该环境的 `Scripts/`（Windows）或 `bin/`（macOS / Linux）加入 PATH，或设环境变量 `STUBBORN_COACH_DOCLING` 指向 docling 可执行文件的绝对路径。docling 提供 layout / OCR / 表格识别 / 公式 LaTeX / 双栏合并，输出高质量 markdown。
 
 ## How It Works
 
@@ -93,14 +94,14 @@ PDF 处理首次会自动 `npm install pdf-parse` 到插件目录，用户无感
 skills/study/SKILL.md              # 主流程；唯一公开 slash command；用隐藏 CLI 持久化双文件
 skills/study/references/
   schema.md                        # .study-state.yml 字段表 + study.md 知识库结构 + citations
-  sm2.md                           # 测验后 SM-2 计算伪代码
   examples.md                      # 首轮输出示例
   probing.md                       # 探查动作、rubric、verdict 与 last_probe 契约
+  persistence.md                   # 落盘协议：CLI 命令、heredoc stdin 格式、本轮结构
 agents/source-ingest.md            # subagent：长 URL/PDF/文本接入
-hooks/enforce-workspace-paths.js   # Bash 白名单；拦截 Write/Edit/MultiEdit 防 diff
-bin/stubborn-coach                 # CLI（公开仅 init；隐藏 write-state/add-* 供 skill 落盘）
-templates/study.md                 # init 复制的初始用户知识库模板
-templates/study-state.yml          # init 复制的初始内部状态模板
+hooks/enforce-workspace-paths.js   # Bash 白名单；Read 自动初始化；拦截 Write/Edit/MultiEdit 防 diff
+bin/stubborn-coach                 # CLI（无公开命令；隐藏 write-state/add-* 供 skill 落盘）
+templates/study.md                 # 自动初始化复制的初始用户知识库模板
+templates/study-state.yml          # 自动初始化复制的初始内部状态模板
 evals/, tests/                     # 触发评测 + 单元测试
 ```
 
@@ -133,15 +134,13 @@ source-files/                      # 用户上传源文件（可选）
 <details>
 <summary>CLI 隐藏命令</summary>
 
-公开 CLI 只展示 `init`。另有七条隐藏内部命令，只供 `study` skill 通过 heredoc 落盘：
+CLI 不暴露初始化命令；学习文件由 Read hook / writer 自动创建。另有五条隐藏内部命令，只供 `study` skill 通过 heredoc 落盘：
 
 - `stubborn-coach write-state`：全量覆盖 `learning-wiki/.study-state.yml`
 - `stubborn-coach add-topic --id <topic-id>`：在 `study.md` 末尾追加主题骨架
 - `stubborn-coach add-node --topic <topic-id> --idx <n>`：在指定主题末尾追加节点讲义
 - `stubborn-coach add-mistake --topic <topic-id> --node <n>`：在指定节点追加错题
-- `stubborn-coach extract-pdf --name <basename>`：PDF 文本层提取；PDF 绝对路径走 stdin heredoc，可容纳带空格 / 方括号 / 中文的文件名
-- `stubborn-coach save-extracted --name <basename> --part <N>`：保存视觉 OCR 分块
-- `stubborn-coach merge-extracted --name <basename>`：合并所有分块为最终 `.txt`
+- `stubborn-coach extract-source --name <basename>`：调本地 docling 把二进制源（PDF / DOCX / PPTX / XLSX / 图像）或 PDF URL 转成 `source-files/<basename>.md`；路径或 URL 走 stdin heredoc，可容纳带空格 / 方括号 / 中文的文件名
 
 </details>
 

@@ -3,6 +3,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
+const { ensureInitialized } = require('../bin/lib/paths');
 const { tempWorkspace } = require('./helpers');
 
 const CLI = path.join(__dirname, '..', 'bin', 'stubborn-coach');
@@ -27,7 +28,7 @@ function writeState(root, { currentNodeIdx, done1 }) {
 }
 
 function initWithTopic(root, { passNode1 = true } = {}) {
-  assert.equal(runCli(['init'], root).status, 0);
+  ensureInitialized(root);
   const topic = [
     '### 测试主题',
     '',
@@ -90,6 +91,44 @@ test('add-node validates idx and heading consistency', () => {
   assert.notEqual(runCli(['add-node', '--topic', 'test-topic', '--idx', '100'], root, nodeBody(100)).status, 0);
   assert.notEqual(runCli(['add-node', '--topic', 'test-topic', '--idx', '2'], root, '##### 3. 不一致\n内容。\n').status, 0);
   assert.notEqual(runCli(['add-node', '--topic', 'test-topic', '--idx', '2'], root, `${nodeBody(2)}<!-- node:2 -->\n`).status, 0);
+});
+
+test('add-node accepts any consistent heading depth and normalizes to #####', () => {
+  const root = tempWorkspace('add-node-shifted');
+  initWithTopic(root);
+  const studyPath = path.join(root, 'learning-wiki', 'study.md');
+  // Author wrote at h2 instead of h5.
+  const shallow = '## 2. 延伸应用\n第二节点讲义。\n';
+  const result = runCli(['add-node', '--topic', 'test-topic', '--idx', '2'], root, shallow);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const after = fs.readFileSync(studyPath, 'utf8');
+  assert(after.includes('<!-- node:2 -->\n##### 2. 延伸应用'));
+});
+
+test('add-node preserves # / ## / ##### inside fenced code blocks', () => {
+  const root = tempWorkspace('add-node-fenced-code');
+  initWithTopic(root);
+  const studyPath = path.join(root, 'learning-wiki', 'study.md');
+  const body = [
+    '## 2. 延伸应用',
+    '',
+    '```python',
+    '# set up the run',
+    '## deliberate fake heading',
+    '### 3. fake node 3',
+    'run()',
+    '```',
+    '',
+    '正文结尾。',
+    '',
+  ].join('\n');
+  const result = runCli(['add-node', '--topic', 'test-topic', '--idx', '2'], root, body);
+  assert.equal(result.status, 0, result.stderr || result.stdout);
+  const after = fs.readFileSync(studyPath, 'utf8');
+  assert(after.includes('<!-- node:2 -->\n##### 2. 延伸应用'));
+  assert(after.includes('# set up the run'));
+  assert(after.includes('## deliberate fake heading'));
+  assert(after.includes('### 3. fake node 3'));
 });
 
 test('add-node refuses to write node N when state.yml has not passed node N-1', () => {

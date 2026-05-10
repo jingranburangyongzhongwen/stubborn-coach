@@ -3,6 +3,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
+const { ensureInitialized } = require('../bin/lib/paths');
 const { tempWorkspace } = require('./helpers');
 
 const CLI = path.join(__dirname, '..', 'bin', 'stubborn-coach');
@@ -11,13 +12,10 @@ function runCli(args, cwd) {
   return spawnSync(process.execPath, [CLI, ...args], { cwd, encoding: 'utf8' });
 }
 
-test('init creates study.md and .study-state.yml with expected defaults', () => {
+test('ensureInitialized creates study.md and .study-state.yml with expected defaults', () => {
   const root = tempWorkspace('init-create');
-  const result = runCli(['init'], root);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
-  const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ok, true);
-  assert.deepEqual(payload.written, [
+  const result = ensureInitialized(root);
+  assert.deepEqual(result.written, [
     path.join('learning-wiki', 'study.md'),
     path.join('learning-wiki', '.study-state.yml'),
   ]);
@@ -35,56 +33,46 @@ test('init creates study.md and .study-state.yml with expected defaults', () => 
   assert.match(state, /^topics: \[\]$/m);
 });
 
-test('init does not create legacy subdirs', () => {
+test('ensureInitialized does not create legacy subdirs', () => {
   const root = tempWorkspace('init-no-legacy');
-  const result = runCli(['init'], root);
-  assert.equal(result.status, 0);
+  ensureInitialized(root);
   for (const legacy of ['sources', 'knowledge', 'sessions', 'reviews']) {
     assert(!fs.existsSync(path.join(root, 'learning-wiki', legacy)), `legacy dir ${legacy} should not exist`);
   }
 });
 
-test('init is idempotent and reports updated when both files already exist', () => {
+test('ensureInitialized is idempotent and reports updated when both files already exist', () => {
   const root = tempWorkspace('init-idempotent');
-  const first = runCli(['init'], root);
-  assert.equal(first.status, 0);
-  const second = runCli(['init'], root);
-  assert.equal(second.status, 0);
-  const payload = JSON.parse(second.stdout);
-  assert.deepEqual(payload.written, []);
-  assert.deepEqual(payload.updated, [
+  ensureInitialized(root);
+  const result = ensureInitialized(root);
+  assert.deepEqual(result.written, []);
+  assert.deepEqual(result.updated, [
     path.join('learning-wiki', 'study.md'),
     path.join('learning-wiki', '.study-state.yml'),
   ]);
 });
 
-test('init refuses legacy frontmatter study.md without creating state', () => {
+test('ensureInitialized refuses legacy frontmatter study.md without creating state', () => {
   const root = tempWorkspace('init-legacy');
   fs.mkdirSync(path.join(root, 'learning-wiki'), { recursive: true });
   fs.writeFileSync(path.join(root, 'learning-wiki', 'study.md'), '---\ntype: study-log\n---\n\n# 学习日志\n', 'utf8');
-  const result = runCli(['init'], root);
-  assert.notEqual(result.status, 0);
-  const payload = JSON.parse(result.stdout);
-  assert.equal(payload.ok, false);
-  assert.equal(payload.error.code, 'LEGACY_STUDY_MD');
+  assert.throws(() => ensureInitialized(root), /legacy study\.md/);
   assert.equal(fs.existsSync(path.join(root, 'learning-wiki', '.study-state.yml')), false);
 });
 
-test('removed subcommands now report unknown_command and exit non-zero', () => {
-  const root = tempWorkspace('init-unknown');
-  for (const removed of ['write-source', 'write-mastery-result', 'write-knowledge-status', 'validate']) {
-    const result = runCli([removed], root);
-    assert.notEqual(result.status, 0, `${removed} should fail`);
-    const payload = JSON.parse(result.stdout);
-    assert.equal(payload.ok, false);
-    assert.equal(payload.error.code, 'UNKNOWN_COMMAND');
-  }
-});
-
-test('help lists only init', () => {
+test('help lists no public commands', () => {
   const root = tempWorkspace('init-help');
   const result = runCli(['--help'], root);
   assert.equal(result.status, 0);
   const payload = JSON.parse(result.stdout);
-  assert.deepEqual(payload.commands, ['init']);
+  assert.deepEqual(payload.commands, []);
+});
+
+test('init command is no longer public', () => {
+  const root = tempWorkspace('init-removed');
+  const result = runCli(['init'], root);
+  assert.notEqual(result.status, 0);
+  const payload = JSON.parse(result.stdout);
+  assert.equal(payload.ok, false);
+  assert.equal(payload.error.code, 'UNKNOWN_COMMAND');
 });

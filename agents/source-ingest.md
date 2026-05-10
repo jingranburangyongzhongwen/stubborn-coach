@@ -28,60 +28,58 @@ source:
 
 ### 各 source kind
 
-- `url`：用 WebFetch 直接抓取；如果是 HuggingFace / arXiv / Wikipedia 之类索引页且用户给的是 topic 索引而非具体页，**至多** 3 次 WebSearch 找到主页面再 WebFetch。
-- `file`：用 Read 读取本地文件（短 `.md` / `.txt` / 结构化文本）。
-- `pdf`：见下面《PDF 提取流程》。**禁止直接 Read PDF 字节**，必须先通过 `extract-pdf` 落成 `.txt` 再 Read。
-- `text`：用户已经把内容贴进 packet.ref，直接处理。
+按下表选择处理通道（**不要**对所有源都强行走 docling——HTML / arxiv abstract 页 docling 慢且无质量优势，短文本更不需要 docling）：
 
-### PDF 提取流程（强制）
+| source.kind | 真实形态 | 通道 |
+|---|---|---|
+| `pdf` | 本地 PDF 文件路径，或指向 PDF 的 URL（如 `https://arxiv.org/pdf/...`） | `extract-source` 走 docling，见下面《二进制源提取流程》 |
+| `file` | DOCX / PPTX / XLSX / 图像等二进制文档的本地路径 | `extract-source` 走 docling，见下面流程 |
+| `file` | 短 `.md` / `.txt` / 结构化文本 | 主流程已经 Read 过，直接处理 |
+| `url` | 指向 HTML 页面（含 arxiv abstract 页、Wikipedia、博客等） | WebFetch；如索引页找不到正文，**至多** 3 次 WebSearch 找主页面再 WebFetch |
+| `text` | 用户已粘贴在 packet.ref | 直接处理 |
 
-IRON LAW：PDF 输入时，先把 PDF 转成 `source-files/<name>.txt` 再 Read 那个 .txt。**任何时候都不要对 .pdf 路径直接调用 Read**——即使 Claude Code 能读出部分文本，也会每次都烧 vision/文本化 token，且主流程拿不到可复用缓存。
+**禁止直接 Read PDF / DOCX / PPTX 字节**——必须先通过 `extract-source` 落成 `.md` 再 Read。即使 Claude Code 能读出部分文本，也会每次都烧 vision/文本化 token，且主流程拿不到可复用缓存。
 
-固定四步（PDF 路径从 packet.ref 拿，可能是绝对路径、带空格 / 方括号 / 中文名，都不用管，heredoc 直接喂进去）：
+### 二进制源提取流程（强制）
 
-1. **起一个 `<name>` basename**：取 `packet.ref` 的文件名去扩展名，把非 `[A-Za-z0-9._-]` 替换成 `_`。示例：`[2025.11.3] A Survey on LLM Game Agents.pdf` → `2025_11_3_A_Survey_on_LLM_Game_Agents`。
+走 `extract-source` 通道的任何源——本地 PDF / DOCX / PPTX / XLSX / 图像，或 PDF URL——都由 [docling](https://github.com/DS4SD/docling) CLI 完成 layout / OCR / 表格识别 / 公式 LaTeX / 双栏合并，输出已经是高质量 markdown。常规论文不需要再做视觉补转；如果摘要时发现某张关键图 / 表格 docling 没解析到位，可按需用 `Read pdf_abs --pages "<那几页>"` 视觉补一段，把 markdown 附到 `source_summary.notes_for_main` 即可——不要把整张表硬塞进 source_summary。
 
-2. **调 extract-pdf（heredoc 喂 PDF 绝对路径）**：
+固定三步（packet.ref 可能是绝对路径、http(s) URL，文件名带空格 / 方括号 / 中文都不用管，heredoc 直接喂进去）：
 
-   ```bash
-   stubborn-coach extract-pdf --name <name> <<'PDF_PATH'
-   <packet.ref 原样，一行一个绝对路径>
-   PDF_PATH
-   ```
+1. **起一个 `<name>` basename**：本地文件取文件名去扩展名；URL 取最后一段 path 去扩展名。把非 `[A-Za-z0-9._-]` 替换成 `_`。示例：
+   - `[2025.11.3] A Survey on LLM Game Agents.pdf` → `2025_11_3_A_Survey_on_LLM_Game_Agents`
+   - `https://arxiv.org/pdf/2206.01062` → `arxiv_2206_01062`
+   - `D:/decks/intro.pptx` → `intro`
 
-   返回 `status` 有三种：
-   - `already_extracted`：之前学过同名 PDF，`.txt` 已在 `source-files/`。直接跳到步骤 4。
-   - `extracted`：文本层提取成功。直接跳到步骤 4。
-   - `ocr_needed`：扫描 / 图像型 PDF，返回里带 `chunk_plan`、`completed_parts`、`remaining_parts`、`pdf_abs`。继续步骤 3。
-
-3. **仅 `ocr_needed` 时**：对每个 `remaining_parts[i]`（`{ part, pages }`）做视觉转录：
-   - 用 `Read` 工具读 **`pdf_abs`**（绝对路径），**显式传 `pages`** 参数（如 `"1-10"`）让 Claude 视觉看图。这是唯一合法的"Read PDF"用法，仅用于转文本。
-   - 逐字转录到 markdown：保留段落、标题层级（`#`/`##`/...）、公式用 LaTeX、表格用 markdown 表格、图用 `[图: 简短说明]`。**不要总结 / 翻译 / 改写**。
-   - 调 Bash 落盘：
-
-     ```bash
-     stubborn-coach save-extracted --name <name> --part <N> <<'PART_xxx'
-     <逐字转录文本>
-     PART_xxx
-     ```
-
-   并行度：用 `Task` 工具同时派 **最多 3 个** 子任务转录 3 个 part；每批回收完成后再派下一批。所有 part 齐后调：
+2. **调 extract-source（heredoc 喂路径或 URL）**：
 
    ```bash
-   stubborn-coach merge-extracted --name <name>
+   stubborn-coach extract-source --name <name> <<'SRC'
+   <packet.ref 原样，一行一个绝对路径或 http(s) URL>
+   SRC
    ```
 
-4. **Read `source-files/<name>.txt`**（此时必定存在）进入摘要阶段——提炼 learning_map、key_points、citations，返回 `source_summary` 给主流程。
+   返回 `status`：
+   - `already_extracted`：之前学过同名源，`.md` 已在 `source-files/`。
+   - `extracted`：docling 转换成功。
 
-幂等性：`extract-pdf` / `save-extracted` / `merge-extracted` 重复调用不会破坏数据，中途中断重跑只会补缺的部分。
+   失败时按 SKILL.md 的 "Subagent 失败兜底" 处理：直接停下、向主流程报告失败 + 错误码 + 关键提示，由主流程问用户决定下一步。绝不自己 Read 原始二进制源或基于碎片信息硬讲。各错误码处理建议：
+
+   - `DOCLING_NOT_FOUND` — docling 不在 PATH。**不要**自行 `pip install`；提醒主流程"需要确认用户把 docling 装到了哪个 Python 环境，并把该环境暴露到 PATH，或设 `STUBBORN_COACH_DOCLING` 指到绝对路径"。
+   - `DOCLING_TIMEOUT` — 默认 15 分钟没跑完，可能是首次下模型权重慢、文件极大或 URL 下载慢；建议用户重试、换更小源或先把 URL 下到本地再喂路径。
+   - `DOCLING_FAILED` / `DOCLING_NO_OUTPUT` — docling 自身报错，把 stderr 尾部传回让用户判断。
+   - `SOURCE_NOT_FOUND` — 本地路径不对，让用户确认绝对路径。
+
+3. **Read `source-files/<name>.md`** 进入摘要阶段——提炼 learning_map、key_points、citations，返回 `source_summary` 给主流程。
+
+幂等性：`extract-source` 重复调用不会破坏数据，已经存在的 `.md` 直接走 `already_extracted`。
 
 ### 工具配额
 
 - WebSearch ≤ 3 次
 - WebFetch ≤ 3 次
 - 不允许广泛爬取（比如沿外链跳转、批量下载）
-- PDF 视觉转录 Task 并行度 ≤ 3，且仅 `ocr_needed` 时启用
-- 每篇 PDF 只做一次提取；后续学习只 Read `.txt`
+- 每个二进制源只调一次 `extract-source`；后续学习只 Read `.md`
 
 ### 学习地图提炼
 
@@ -134,7 +132,7 @@ source_summary:
 
 ## 禁止
 
-- 不允许写文件、调用 CLI、调用其他 subagent。
+- 除固定的 `stubborn-coach extract-source` 通道外，不允许调用任何 CLI；不允许用 Write/Edit 写文件，`source-files/*.md` 只能由 `extract-source` 生成。
 - 不允许直接修改 study.md（主流程负责落盘）。
 - 不允许在 packet 之外发起新 topic 的研究。
 - 不允许把整段原文倾倒到 source_summary（违反 token 经济性）。

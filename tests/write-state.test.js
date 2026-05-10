@@ -3,6 +3,7 @@ const { spawnSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
 const test = require('node:test');
+const { ensureInitialized } = require('../bin/lib/paths');
 const { tempWorkspace } = require('./helpers');
 
 const CLI = path.join(__dirname, '..', 'bin', 'stubborn-coach');
@@ -11,9 +12,8 @@ function runCli(args, cwd, input = '') {
   return spawnSync(process.execPath, [CLI, ...args], { cwd, input, encoding: 'utf8' });
 }
 
-function init(root) {
-  const result = runCli(['init'], root);
-  assert.equal(result.status, 0, result.stderr || result.stdout);
+function initialize(root) {
+  ensureInitialized(root);
 }
 
 function stateWithTopics(ids) {
@@ -25,7 +25,7 @@ function stateWithTopics(ids) {
 
 test('write-state writes valid YAML and does not touch study.md', () => {
   const root = tempWorkspace('write-state-valid');
-  init(root);
+  initialize(root);
   const studyPath = path.join(root, 'learning-wiki', 'study.md');
   const beforeStudy = fs.readFileSync(studyPath, 'utf8');
   const input = stateWithTopics(['alpha']);
@@ -40,7 +40,7 @@ test('write-state writes valid YAML and does not touch study.md', () => {
 
 test('write-state rejects empty, markdown, wrong type, and missing topics', () => {
   const root = tempWorkspace('write-state-invalid');
-  init(root);
+  initialize(root);
   for (const input of ['', '# 学习日志\n', 'type: other\ngenerated_at: 2026-04-30\ntopics: []\n', 'type: study-log\ncurrent_topic: null\n']) {
     const result = runCli(['write-state'], root, input);
     assert.notEqual(result.status, 0, `input should fail: ${input}`);
@@ -49,7 +49,7 @@ test('write-state rejects empty, markdown, wrong type, and missing topics', () =
 
 test('write-state normalizes omitted constant type field', () => {
   const root = tempWorkspace('write-state-missing-type');
-  init(root);
+  initialize(root);
   const input = 'generated_at: "2026-04-30"\ncurrent_topic: null\ntopics: []\n';
   const result = runCli(['write-state'], root, input);
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -61,7 +61,7 @@ test('write-state normalizes omitted constant type field', () => {
 
 test('write-state allows first non-empty topics write after init template', () => {
   const root = tempWorkspace('write-state-first-topic');
-  init(root);
+  initialize(root);
   assert.equal(runCli(['write-state'], root, stateWithTopics(['first-topic'])).status, 0);
 });
 
@@ -74,7 +74,7 @@ function stateWithMap(id, currentIdx, doneFlags) {
 
 test('write-state accepts consistent done-prefix with matching current_node_idx', () => {
   const root = tempWorkspace('write-state-invariant-ok');
-  init(root);
+  initialize(root);
   const cases = [
     stateWithMap('a', 1, [false, false, false]),
     stateWithMap('a', 2, [true, false, false]),
@@ -89,7 +89,7 @@ test('write-state accepts consistent done-prefix with matching current_node_idx'
 
 test('write-state rejects done flags that are not a true-prefix', () => {
   const root = tempWorkspace('write-state-invariant-gap');
-  init(root);
+  initialize(root);
   const result = runCli(['write-state'], root, stateWithMap('a', 2, [true, false, true]));
   assert.notEqual(result.status, 0);
   const payload = JSON.parse(result.stdout);
@@ -98,7 +98,7 @@ test('write-state rejects done flags that are not a true-prefix', () => {
 
 test('write-state rejects current_node_idx that disagrees with done count', () => {
   const root = tempWorkspace('write-state-invariant-idx');
-  init(root);
+  initialize(root);
   const result = runCli(['write-state'], root, stateWithMap('a', 3, [true, false, false]));
   assert.notEqual(result.status, 0);
   const payload = JSON.parse(result.stdout);
@@ -109,7 +109,7 @@ test('write-state rejects current_node_idx that disagrees with done count', () =
 
 test('write-state accepts YAML bool variants for done (True / TRUE / yes / quoted)', () => {
   const root = tempWorkspace('write-state-bool-variants');
-  init(root);
+  initialize(root);
   const variants = [
     `type: study-log\ngenerated_at: 2026-04-30\ncurrent_topic: a\ntopics:\n  - id: a\n    title: a\n    current_node_idx: 3\n    map:\n      - idx: 1\n        label: n1\n        done: True\n      - idx: 2\n        label: n2\n        done: TRUE\n      - idx: 3\n        label: n3\n        done: false\n`,
     `type: study-log\ngenerated_at: 2026-04-30\ncurrent_topic: a\ntopics:\n  - id: a\n    title: a\n    current_node_idx: 2\n    map:\n      - idx: 1\n        label: n1\n        done: yes\n      - idx: 2\n        label: n2\n        done: no\n`,
@@ -123,7 +123,7 @@ test('write-state accepts YAML bool variants for done (True / TRUE / yes / quote
 
 test('write-state accepts quoted integer for current_node_idx and idx', () => {
   const root = tempWorkspace('write-state-int-quoted');
-  init(root);
+  initialize(root);
   const input = `type: study-log\ngenerated_at: 2026-04-30\ncurrent_topic: a\ntopics:\n  - id: a\n    title: a\n    current_node_idx: "2"\n    map:\n      - idx: "1"\n        label: n1\n        done: true\n      - idx: "2"\n        label: n2\n        done: false\n`;
   const result = runCli(['write-state'], root, input);
   assert.equal(result.status, 0, result.stderr || result.stdout);
@@ -131,7 +131,7 @@ test('write-state accepts quoted integer for current_node_idx and idx', () => {
 
 test('write-state still catches inconsistency when bools are uppercase', () => {
   const root = tempWorkspace('write-state-bool-uppercase-bad');
-  init(root);
+  initialize(root);
   const input = `type: study-log\ngenerated_at: 2026-04-30\ncurrent_topic: a\ntopics:\n  - id: a\n    title: a\n    current_node_idx: 2\n    map:\n      - idx: 1\n        label: n1\n        done: True\n      - idx: 2\n        label: n2\n        done: True\n      - idx: 3\n        label: n3\n        done: false\n`;
   const result = runCli(['write-state'], root, input);
   assert.notEqual(result.status, 0);

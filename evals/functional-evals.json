@@ -1,13 +1,8 @@
 [
   {
-    "name": "init creates study markdown and state yaml",
+    "name": "removed init command is rejected",
     "command": "init",
-    "expect": ["learning-wiki/study.md", "learning-wiki/.study-state.yml"]
-  },
-  {
-    "name": "init does not create legacy subdirs",
-    "command": "init",
-    "expect_missing": ["learning-wiki/sources", "learning-wiki/knowledge", "learning-wiki/sessions", "learning-wiki/reviews"]
+    "expect_ok": false
   },
   {
     "name": "removed write-source command is rejected",
@@ -37,9 +32,9 @@
     "expect_exit": 2
   },
   {
-    "name": "path guard allows stubborn-coach init",
+    "name": "path guard rejects stubborn-coach init",
     "hook": { "tool_name": "Bash", "tool_input": { "command": "stubborn-coach init" } },
-    "expect_exit": 0
+    "expect_exit": 2
   },
   {
     "name": "path guard allows hidden write-state heredoc",

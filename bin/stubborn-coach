@@ -1,9 +1,8 @@
 #!/usr/bin/env node
 const fs = require('fs');
 const path = require('path');
-const { ensureWikiDirs, PLUGIN_ROOT, resolveWorkspacePath } = require('./lib/paths');
-const { localDate } = require('./lib/date');
-const { extractPdf, saveExtracted, mergeExtracted } = require('./lib/pdf-cli');
+const { ensureInitialized, resolveWorkspacePath } = require('./lib/paths');
+const { extractSource } = require('./lib/pdf-cli');
 
 function jsonOut(payload, exitCode = 0) {
   process.stdout.write(`${JSON.stringify(payload)}\n`);
@@ -25,21 +24,13 @@ function commandError(command, error) {
 const HELP = {
   global: {
     usage: 'stubborn-coach <command>',
-    commands: ['init'],
+    commands: [],
     notes: [
-      'stubborn-coach manages learning-wiki/study.md and learning-wiki/.study-state.yml.',
+      'stubborn-coach auto-creates learning-wiki/study.md and learning-wiki/.study-state.yml on first use.',
       'All learning state is owned by the study skill (LLM main flow). Hidden writer commands are not public API.',
     ],
   },
-  init: {
-    usage: 'stubborn-coach init',
-    description: 'Create learning-wiki/study.md and learning-wiki/.study-state.yml in the current workspace if missing. Idempotent.',
-  },
 };
-
-function hasHelpArg(args) {
-  return args.includes('--help') || args.includes('-h');
-}
 
 function helpPayload(topic) {
   return {
@@ -57,17 +48,6 @@ function codedError(code, message, details = {}) {
   return error;
 }
 
-function workspaceFiles(root = process.cwd()) {
-  return {
-    studyPath: path.join(root, 'learning-wiki', 'study.md'),
-    statePath: path.join(root, 'learning-wiki', '.study-state.yml'),
-  };
-}
-
-function relativeTo(root, filePath) {
-  return path.relative(root, filePath);
-}
-
 function normalizeWithTrailingNewline(value) {
   const text = String(value || '');
   return text.endsWith('\n') ? text : `${text}\n`;
@@ -75,7 +55,7 @@ function normalizeWithTrailingNewline(value) {
 
 function ensureStudyExists(studyPath) {
   if (!fs.existsSync(studyPath)) {
-    throw codedError('STUDY_MD_MISSING', '`learning-wiki/study.md` is missing; run `stubborn-coach init` first');
+    throw codedError('STUDY_MD_MISSING', '`learning-wiki/study.md` is missing; initialization should happen automatically before study reads or writes');
   }
 }
 
@@ -244,42 +224,9 @@ function assertValidStateYaml(value) {
   return { text };
 }
 
-function firstLine(value) {
-  return String(value || '').split(/\r?\n/, 1)[0] || '';
-}
-
-function init() {
-  const root = process.cwd();
-  ensureWikiDirs(root);
-  const { studyPath, statePath } = workspaceFiles(root);
-  const written = [];
-  const updated = [];
-  if (fs.existsSync(studyPath) && !fs.existsSync(statePath) && firstLine(fs.readFileSync(studyPath, 'utf8')) === '---') {
-    throw codedError('LEGACY_STUDY_MD', 'legacy study.md with frontmatter detected; back it up and remove it before running init');
-  }
-  if (!fs.existsSync(studyPath)) {
-    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study.md');
-    const content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
-    fs.writeFileSync(studyPath, content);
-    written.push(relativeTo(root, studyPath));
-  } else {
-    updated.push(relativeTo(root, studyPath));
-  }
-  if (!fs.existsSync(statePath)) {
-    const templatePath = path.join(PLUGIN_ROOT, 'templates', 'study-state.yml');
-    let content = fs.readFileSync(templatePath, 'utf8').replace(/\r\n/g, '\n');
-    content = content.replace(/^generated_at:.*$/m, `generated_at: ${localDate()}`);
-    fs.writeFileSync(statePath, content);
-    written.push(relativeTo(root, statePath));
-  } else {
-    updated.push(relativeTo(root, statePath));
-  }
-  return { written, updated };
-}
-
 function writeState(content = '') {
   const root = process.cwd();
-  ensureWikiDirs(root);
+  ensureInitialized(root);
   const statePath = resolveWorkspacePath('learning-wiki/.study-state.yml', { cwd: root, allowSourceFiles: false });
   const { text } = assertValidStateYaml(content);
   const normalized = normalizeWithTrailingNewline(text);
@@ -351,30 +298,136 @@ function findNodeBounds(content, topic, node) {
   };
 }
 
+// Walk lines, calling `transform` only on lines outside fenced code blocks
+// (``` or ~~~ fences, 3+ of the same char). Fence markers are preserved verbatim.
+// This keeps heading normalization from mangling `# comment` / `## title` inside
+// shell / markdown code examples in lecture bodies.
+function mapLinesOutsideFences(text, transform) {
+  const lines = text.split('\n');
+  let fenceChar = null;
+  for (let i = 0; i < lines.length; i += 1) {
+    const line = lines[i];
+    if (fenceChar === null) {
+      const open = line.match(/^(`{3,}|~{3,})/);
+      if (open) {
+        fenceChar = open[1][0];
+      } else {
+        lines[i] = transform(line);
+      }
+    } else if (new RegExp(`^\\${fenceChar}{3,}\\s*$`).test(line)) {
+      fenceChar = null;
+    }
+  }
+  return lines.join('\n');
+}
+
+function findFirstHeadingLevelOutsideFences(text) {
+  const lines = text.split('\n');
+  let fenceChar = null;
+  for (const line of lines) {
+    if (fenceChar === null) {
+      const open = line.match(/^(`{3,}|~{3,})/);
+      if (open) { fenceChar = open[1][0]; continue; }
+      const h = line.match(/^(#+)\s+\S/);
+      if (h) return h[1].length;
+    } else if (new RegExp(`^\\${fenceChar}{3,}\\s*$`).test(line)) {
+      fenceChar = null;
+    }
+  }
+  return null;
+}
+
+// Normalize so the first markdown heading sits at `targetTopLevel`, shifting every
+// other heading by the same delta. Lets stdin authors pick any consistent depth
+// (`# Topic` or `### Topic`) without having to remember the canonical level.
+function shiftHeadingsToTopLevel(text, targetTopLevel) {
+  const firstLevel = findFirstHeadingLevelOutsideFences(text);
+  if (firstLevel === null) return text;
+  const shift = targetTopLevel - firstLevel;
+  if (shift === 0) return text;
+  return mapLinesOutsideFences(text, (line) => {
+    const m = line.match(/^(#{1,6})(\s+\S.*)$/);
+    if (!m) return line;
+    const newLevel = m[1].length + shift;
+    if (newLevel < 1 || newLevel > 6) return line;
+    return '#'.repeat(newLevel) + m[2];
+  });
+}
+
+// Numbered headings like `### 1. basic meaning` always represent node headings
+// regardless of what depth the author picked, so force them to h5 after any shift.
+// This saves authors from having to get the topic-to-node level delta right.
+function forceNumberedNodeHeadings(text) {
+  return mapLinesOutsideFences(text, (line) => {
+    const m = line.match(/^#+(\s+\d+\. .*)$/);
+    if (!m) return line;
+    return `#####${m[1]}`;
+  });
+}
+
 function injectNodeOneAnchor(value) {
   const text = normalizeWithTrailingNewline(value);
-  const nodeHeader = text.match(/^##### 1\. .+$/m);
-  if (!nodeHeader) {
-    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must include node 1 lecture headed by `##### 1. ...`');
+  const lines = text.split('\n');
+  let fenceChar = null;
+  let cursor = 0;
+  let nodeCharIdx = -1;
+  for (const line of lines) {
+    if (fenceChar === null) {
+      const open = line.match(/^(`{3,}|~{3,})/);
+      if (open) {
+        fenceChar = open[1][0];
+      } else if (/^##### 1\. .+$/.test(line)) {
+        nodeCharIdx = cursor;
+        break;
+      }
+    } else if (new RegExp(`^\\${fenceChar}{3,}\\s*$`).test(line)) {
+      fenceChar = null;
+    }
+    cursor += line.length + 1;
   }
-  const before = text.slice(0, nodeHeader.index);
-  const after = text.slice(nodeHeader.index);
+  if (nodeCharIdx < 0) {
+    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must include node 1 lecture headed by `1. {label}`');
+  }
+  const before = text.slice(0, nodeCharIdx);
+  const after = text.slice(nodeCharIdx);
   const prefix = before.endsWith('\n') ? '' : '\n';
   return `${before}${prefix}<!-- node:1 -->\n${after}`;
 }
 
+// Pull off the first non-empty line as the topic title, stripping any leading
+// `#` markers the author may have added. Returns { title, body }.
+// This way the stdin schema is "title line + sections", with section heading
+// levels normalized by the CLI — authors never decide what depth `### {title}`
+// sits at, removing the heading-level dimension that LLMs kept getting wrong.
+function splitTitleFromTopicStdin(raw) {
+  const lines = raw.split(/\r?\n/);
+  let titleIdx = -1;
+  for (let i = 0; i < lines.length; i += 1) {
+    if (lines[i].trim()) { titleIdx = i; break; }
+  }
+  if (titleIdx < 0) return { title: '', body: '' };
+  const titleLine = lines[titleIdx].replace(/^#+\s*/, '').trim();
+  const body = lines.slice(titleIdx + 1).join('\n');
+  return { title: titleLine, body };
+}
+
 function addTopic(args, content = '') {
   const root = process.cwd();
+  ensureInitialized(root);
   const parsed = parseArgs(args);
   requireOnlyArgs(parsed, ['--id']);
   const id = parsed['--id'];
   assertKebabId(id, '--id');
-  const value = String(content || '');
-  if (!value.trim()) throw codedError('EMPTY_STDIN', 'add-topic requires markdown content on stdin');
-  if (!/^### /m.test(value) || !value.trimStart().startsWith('### ')) {
-    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must start with `### `');
+  const raw = String(content || '');
+  if (!raw.trim()) throw codedError('EMPTY_STDIN', 'add-topic requires markdown content on stdin');
+  const { title, body } = splitTitleFromTopicStdin(raw);
+  if (!title) {
+    throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin first non-empty line must be the topic title');
   }
-  if (/^# /m.test(value)) throw codedError('INVALID_TOPIC_STDIN', 'add-topic stdin must not contain an H1 heading');
+  // Section headings (学习目标 / 学习地图 / 节点讲义) shift to h4; numbered node
+  // headings then get pinned to h5 regardless of what the author picked.
+  const normalizedBody = forceNumberedNodeHeadings(shiftHeadingsToTopLevel(body, 4));
+  const value = `### ${title}\n${normalizedBody.startsWith('\n') ? normalizedBody : `\n${normalizedBody}`}`;
   assertNoAnchor(value);
 
   const { studyPath, content: current } = readStudy(root);
@@ -393,7 +446,7 @@ function addTopic(args, content = '') {
 function readStateTopicsOrThrow(root) {
   const statePath = path.join(root, 'learning-wiki', '.study-state.yml');
   if (!fs.existsSync(statePath)) {
-    throw codedError('STATE_MISSING', '`learning-wiki/.study-state.yml` is missing; run `stubborn-coach init` and `write-state` first');
+    throw codedError('STATE_MISSING', '`learning-wiki/.study-state.yml` is missing; write-state must run before add-node');
   }
   return parseTopicsForInvariant(fs.readFileSync(statePath, 'utf8'));
 }
@@ -415,17 +468,23 @@ function assertPrevNodeDone(root, topicId, idx) {
 
 function addNode(args, content = '') {
   const root = process.cwd();
+  ensureInitialized(root);
   const parsed = parseArgs(args);
   requireOnlyArgs(parsed, ['--topic', '--idx']);
   const topic = parsed['--topic'];
   const idx = Number(parsed['--idx']);
   assertKebabId(topic, '--topic');
   assertSmallInt(parsed['--idx'], '--idx');
-  const value = String(content || '');
-  if (!value.trim()) throw codedError('EMPTY_STDIN', 'add-node requires markdown content on stdin');
-  if (!value.trimStart().startsWith(`##### ${idx}. `)) {
-    throw codedError('INVALID_NODE_STDIN', `add-node stdin must start with \`##### ${idx}. \``);
+  const raw = String(content || '');
+  if (!raw.trim()) throw codedError('EMPTY_STDIN', 'add-node requires markdown content on stdin');
+  const headingMatch = raw.trimStart().match(/^(#+)\s+(\d+)\. /);
+  if (!headingMatch) {
+    throw codedError('INVALID_NODE_STDIN', `add-node stdin must start with a heading like \`${idx}. {label}\``);
   }
+  if (Number(headingMatch[2]) !== idx) {
+    throw codedError('INVALID_NODE_STDIN', `add-node stdin heading number must match --idx ${idx}`, { stdin_idx: Number(headingMatch[2]), arg_idx: idx });
+  }
+  const value = forceNumberedNodeHeadings(shiftHeadingsToTopLevel(raw, 5));
   assertNoAnchor(value);
 
   const { studyPath, content: current } = readStudy(root);
@@ -449,6 +508,7 @@ function addNode(args, content = '') {
 
 function addMistake(args, content = '') {
   const root = process.cwd();
+  ensureInitialized(root);
   const parsed = parseArgs(args);
   requireOnlyArgs(parsed, ['--topic', '--node']);
   const topic = parsed['--topic'];
@@ -478,6 +538,59 @@ function addMistake(args, content = '') {
   };
 }
 
+function computeSm2(args) {
+  const parsed = parseArgs(args);
+  requireOnlyArgs(parsed, ['--quality', '--ease', '--interval', '--reps', '--today']);
+  const quality = Number(parsed['--quality']);
+  const today = parsed['--today'];
+  if (!Number.isInteger(quality) || quality < 0 || quality > 5) {
+    throw codedError('INVALID_ARGS', '--quality must be an integer from 0 to 5');
+  }
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(today)) {
+    throw codedError('INVALID_ARGS', '--today must be YYYY-MM-DD');
+  }
+  let ease = Number(parsed['--ease']);
+  let reps = Number(parsed['--reps']);
+  let intv = Number(parsed['--interval']);
+  if (!Number.isFinite(ease) || ease < 1.3) ease = 2.5;
+  if (!Number.isInteger(reps) || reps < 0) reps = 0;
+  if (!Number.isInteger(intv) || intv < 0) intv = 0;
+
+  if (quality < 3) {
+    reps = 0;
+    intv = 1;
+  } else {
+    reps = reps + 1;
+    if (reps === 1) {
+      intv = 1;
+    } else if (reps === 2) {
+      intv = quality === 5 ? 6 : 3;
+    } else {
+      intv = Math.max(1, Math.round(intv * ease));
+    }
+    ease = Math.max(1.3, ease + (0.1 - (5 - quality) * (0.08 + (5 - quality) * 0.02)));
+  }
+
+  const todayDate = new Date(`${today}T00:00:00Z`);
+  const nextDate = new Date(todayDate);
+  nextDate.setUTCDate(nextDate.getUTCDate() + intv);
+  const nextReview = nextDate.toISOString().slice(0, 10);
+
+  let status;
+  if (quality >= 4) status = 'met_target';
+  else if (quality < 3) status = 'needs_review';
+  else status = 'in_progress';
+
+  return {
+    last_reviewed: today,
+    next_review: nextReview,
+    interval_days: intv,
+    repetitions: reps,
+    ease_factor: Math.round(ease * 100) / 100,
+    status,
+  };
+}
+
 function main() {
   const [command, ...args] = process.argv.slice(2);
   try {
@@ -487,12 +600,6 @@ function main() {
 
     if (command === 'help') {
       jsonOut(helpPayload(args[0]));
-    }
-
-    if (command === 'init') {
-      if (hasHelpArg(args)) jsonOut(helpPayload('init'));
-      const result = init();
-      jsonOut({ ok: true, command, written: result.written, updated: result.updated, warnings: [] });
     }
 
     if (command === 'write-state') {
@@ -519,34 +626,24 @@ function main() {
       jsonOut({ ok: true, command, written: result.written, bytes: result.bytes, warnings: [] });
     }
 
-    if (command === 'extract-pdf') {
+    if (command === 'compute-sm2') {
+      const result = computeSm2(args);
+      jsonOut({ ok: true, command, ...result });
+    }
+
+    if (command === 'extract-source') {
       const parsed = parseArgs(args);
       requireOnlyArgs(parsed, ['--name']);
       const input = fs.readFileSync(0, 'utf8');
-      extractPdf({ name: parsed['--name'] }, input)
+      extractSource({ name: parsed['--name'] }, input)
         .then((result) => jsonOut({ command, ...result }))
         .catch((error) => jsonOut(commandError(command, error), 1));
       return;
     }
 
-    if (command === 'save-extracted') {
-      const parsed = parseArgs(args);
-      requireOnlyArgs(parsed, ['--name', '--part']);
-      const input = fs.readFileSync(0, 'utf8');
-      const result = saveExtracted({ name: parsed['--name'], part: parsed['--part'] }, input);
-      jsonOut({ command, ...result });
-    }
-
-    if (command === 'merge-extracted') {
-      const parsed = parseArgs(args);
-      requireOnlyArgs(parsed, ['--name']);
-      const result = mergeExtracted({ name: parsed['--name'] });
-      jsonOut({ command, ...result });
-    }
-
     const error = new Error(`unknown command: ${command}`);
     error.code = 'UNKNOWN_COMMAND';
-    error.details = { hint: 'Only public `init` is supported. Run `stubborn-coach help` to see usage.' };
+    error.details = { hint: 'Initialization is automatic. Public CLI commands are intentionally hidden from normal use.' };
     throw error;
   } catch (error) {
     jsonOut(commandError(command || 'unknown', error), 1);
@@ -561,7 +658,7 @@ module.exports = {
   addMistake,
   addNode,
   addTopic,
-  init,
+  computeSm2,
   main,
   writeState,
 };

@@ -32,9 +32,9 @@ test('rejects traversal, absolute escapes, home and temp roots', () => {
   }
 });
 
-test('only `stubborn-coach init` plus hidden writer commands are allowed via Bash', () => {
-  assert.equal(validateBashCommand('stubborn-coach init'), true);
-  assert.equal(validateBashCommand('stubborn-coach init --help'), true);
+test('only hidden study commands are allowed via Bash', () => {
+  assert.throws(() => validateBashCommand('stubborn-coach init'), /Initialization is automatic/);
+  assert.throws(() => validateBashCommand('stubborn-coach init --help'), /Initialization is automatic/);
   assert.equal(validateBashCommand('stubborn-coach --help'), true);
   assert.equal(validateBashCommand('stubborn-coach help'), true);
   assert.equal(validateBashCommand('stubborn-coach write-state'), true);
@@ -42,9 +42,9 @@ test('only `stubborn-coach init` plus hidden writer commands are allowed via Bas
   assert.equal(validateBashCommand("stubborn-coach add-topic --id foo-bar <<'TOPIC'\n### Foo\nTOPIC"), true);
   assert.equal(validateBashCommand("stubborn-coach add-node --topic foo-bar --idx 2 <<'NODE'\n##### 2. Next\nNODE"), true);
   assert.equal(validateBashCommand("stubborn-coach add-mistake --topic foo-bar --node 2 <<'MISTAKE'\n- 错题\nMISTAKE"), true);
-  assert.throws(() => validateBashCommand('stubborn-coach write-source'), /init.*write-state/);
-  assert.throws(() => validateBashCommand('stubborn-coach validate'), /init.*write-state/);
-  assert.throws(() => validateBashCommand('stubborn-coach write-mastery-result'), /init.*write-state/);
+  assert.throws(() => validateBashCommand('stubborn-coach write-source'), /hidden study commands/);
+  assert.throws(() => validateBashCommand('stubborn-coach validate'), /hidden study commands/);
+  assert.throws(() => validateBashCommand('stubborn-coach write-mastery-result'), /hidden study commands/);
   assert.throws(() => validateBashCommand("stubborn-coach write-state <<'STATE'\ntype: study-log\nSTATE\necho bad"), /heredoc/);
   assert.throws(() => validateBashCommand("stubborn-coach write-state <<'STATE'\ntype: study-log\nSTATE\nSTATE"), /heredoc/);
   assert.throws(() => validateBashCommand('node script.js'), /only Bash/);
@@ -54,14 +54,22 @@ test('only `stubborn-coach init` plus hidden writer commands are allowed via Bas
   assert.throws(() => validateBashCommand('stubborn-coach add-topic --topic foo'), /add-topic/);
   assert.throws(() => validateBashCommand('stubborn-coach add-node --topic foo --idx 100'), /integer from 1 to 99/);
   assert.throws(() => validateBashCommand('stubborn-coach add-mistake --topic foo --node 2;rm'), /arguments|allowed|chaining/);
+  assert.equal(validateBashCommand('stubborn-coach compute-sm2 --quality 4 --ease 2.5 --interval 6 --reps 2 --today 2026-05-10'), true);
+  assert.throws(() => validateBashCommand('stubborn-coach compute-sm2 --quality 7 --ease 2.5 --interval 6 --reps 2 --today 2026-05-10'), /0 to 5/);
+  assert.throws(() => validateBashCommand('stubborn-coach compute-sm2 --quality 4 --ease 2.5 --interval 6 --reps 2 --today bad-date'), /YYYY-MM-DD/);
+  assert.throws(() => validateBashCommand('stubborn-coach compute-sm2 --quality 4'), /compute-sm2/);
+  assert.throws(() => validateBashCommand('stubborn-coach compute-sm2 --quality 4 --ease abc --interval 6 --reps 2 --today 2026-05-10'), /non-negative number/);
 });
 
 test('allows a single leading `cd <path> &&` prefix because Cursor injects one', () => {
-  assert.equal(validateBashCommand('cd "D:\\OneDrive\\idreamsky\\learn-skill-design" && stubborn-coach init'), true);
-  assert.equal(validateBashCommand("cd 'D:/work/proj' && stubborn-coach init"), true);
-  assert.equal(validateBashCommand('cd /tmp/proj && stubborn-coach init'), true);
+  assert.throws(() => validateBashCommand('cd "D:\\OneDrive\\idreamsky\\learn-skill-design" && stubborn-coach init'), /Initialization is automatic/);
+  assert.throws(() => validateBashCommand("cd 'D:/work/proj' && stubborn-coach init"), /Initialization is automatic/);
+  assert.throws(() => validateBashCommand('cd /tmp/proj && stubborn-coach init'), /Initialization is automatic/);
   assert.equal(validateBashCommand('cd "D:\\proj" && stubborn-coach --help'), true);
   assert.equal(validateBashCommand('cd "D:\\proj" && stubborn-coach write-state'), true);
+  // Tolerate cmd.exe-style `cd /d` flag — bash treats it as noise but LLMs reflexively emit it on Windows.
+  assert.throws(() => validateBashCommand('cd /d "D:\\proj" && stubborn-coach init'), /Initialization is automatic/);
+  assert.throws(() => validateBashCommand('cd /D /tmp/proj && stubborn-coach init'), /Initialization is automatic/);
   // Reject cd traversal:
   assert.throws(() => validateBashCommand('cd ../escape && stubborn-coach init'), /may not contain \.\./);
   // Reject any further chain after cd:
@@ -90,12 +98,6 @@ test('hook blocks Write/Edit/MultiEdit tools so terminal never renders file diff
 test('hook auto-approves whitelisted bash commands', () => {
   const root = tempWorkspace('hook-bash-allow');
   ensureWikiDirs(root);
-  const bashInit = runHook(root, { tool_name: 'Bash', tool_input: { command: 'stubborn-coach init' } });
-  assert.equal(bashInit.status, 0);
-  assertAllow(bashInit.stdout);
-  const bashCdInit = runHook(root, { tool_name: 'Bash', tool_input: { command: 'cd "D:\\proj" && stubborn-coach init' } });
-  assert.equal(bashCdInit.status, 0);
-  assertAllow(bashCdInit.stdout);
   const bashWriteState = runHook(root, { tool_name: 'Bash', tool_input: { command: "stubborn-coach write-state <<'STATE'\ntype: study-log\nSTATE" } });
   assert.equal(bashWriteState.status, 0);
   assertAllow(bashWriteState.stdout);
@@ -115,19 +117,17 @@ test('hook denies legacy paths and forbidden bash subcommands (with stdout JSON 
   assertDeny(writeOutsideHome.stdout, /writable|not allowed/);
   const bashWriteSource = runHook(root, { tool_name: 'Bash', tool_input: { command: 'stubborn-coach write-source' } });
   assert.equal(bashWriteSource.status, 2);
-  assertDeny(bashWriteSource.stdout, /init.*write-state/);
+  assertDeny(bashWriteSource.stdout, /hidden study commands/);
 });
 
-test('hook does not auto-approve non-write tools (Read passes through to normal permission flow)', () => {
+test('hook auto-initializes learning wiki before Read', () => {
   const root = tempWorkspace('hook-passthrough');
-  ensureWikiDirs(root);
   const readAny = runHook(root, { tool_name: 'Read', tool_input: { file_path: 'learning-wiki/study.md' } });
   assert.equal(readAny.status, 0);
-  // Read 没有 file_path 进入 filePathsFor 时，Read 仍走 passthrough（exit 0、空 stdout）。
-  // 这里我们让 Read 也带 file_path（Claude Code 实际行为），但 Read 不是 Write/Edit/MultiEdit 之一。
-  // 当前 hook 配置只匹配 Write|Edit|MultiEdit|Bash，所以正常情况下 Read 根本不会调到 hook。
-  // 兜底测试：若手动塞 file_path 进 Read，hook 还是走 resolveWorkspacePath 校验后 allow（因为 study.md 在白名单）。
   assertAllow(readAny.stdout);
+  assert(fs.existsSync(path.join(root, 'learning-wiki', 'study.md')));
+  assert(fs.existsSync(path.join(root, 'learning-wiki', '.study-state.yml')));
+  assert(fs.existsSync(path.join(root, 'source-files')));
 });
 
 function runHook(cwd, input) {
