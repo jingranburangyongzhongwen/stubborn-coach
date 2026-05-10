@@ -88,7 +88,7 @@ topics:
 | `topics[].key_points` | topic 创建时生成的全局摘要；node 探查只用当前节点 `map[].key_points` |
 | `topics[].citations` | 可选；只有 URL/PDF/文件/WebFetch 等外部来源事实进入 key_points 或讲义时写入，用于追溯来源 |
 | `topics[].misconceptions` | 每次 `last_probe.misconceptions` 追加去重；node/topic/review 都可写 |
-| `topics[].last_probe` | 探查每一轮（首问 / 补问 / 终态）都完整覆盖；非终态保留 `verdict: in_progress` + `evidence_ledger` + `current_question` 以便 T-Resume 接续；只保存结构化摘要，不保存完整问答转录 |
+| `topics[].last_probe` | 探查首问不写；用户答题后的补问 / 终态轮才完整覆盖。非终态保留 `verdict: in_progress` + `evidence_ledger` + `current_question` 以便 T-Resume 接续；只保存结构化摘要，不保存完整问答转录 |
 | `topics[].next_review / interval_days / repetitions / ease_factor` | 首次教学完成（未测验）时初始化为 `today+1 / 1 / 0 / 2.5`，`status: in_progress`；之后每次完整 topic / review 探查调 `compute-sm2` CLI 计算并覆盖这 4 个字段 + `status` |
 | `topics[].status` | topic/review 后按 quality 推断；node 验证保持 `in_progress`，除非全节点完成 |
 

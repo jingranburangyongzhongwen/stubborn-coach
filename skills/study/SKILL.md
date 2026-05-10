@@ -51,11 +51,12 @@ WebSearch 只用于发现入口，搜索结果摘要不能直接写进讲义、k
 
 - **Step 0 轮边界**：深度问询是独立一轮，只输出 F/M 选择三行后结束本轮。完整规则见 `references/examples.md`。
 - **节点边界**：只讲当前节点 key_points，用 `（具体机制在节点 N 展开）` 预告后续。详见 `references/examples.md`。
+- **节点讲法**：默认按“问题 / 机制 / 例子 / 误解或边界”讲；若 key_points 主要是实验、对比、消融、鲁棒性、失败或适用边界，则按“结果支持什么、证据强度、不能证明什么”讲。详见 `references/examples.md`。
 - **探查初始化**：每次探查前 Read `references/probing.md`，初始化证据账本和闭合条件，再出第一题。
 - **节点通过即开讲下一节点**：节点探查通过后，同一个输出里先给反馈，紧接着输出下一节点教学正文和出口提示，再落盘。
-- **探查状态机**：T-Open → T-Step → T-Close（P1-P5），非终态轮 `verdict=in_progress` 保证用户中途退出可 T-Resume。详见 `references/probing.md`。
+- **探查状态机**：T-Open → T-Step → T-Close（P1-P5）；T-Open 首问不落盘，用户答题后的非终态轮才写 `verdict=in_progress` 以支持 T-Resume。详见 `references/probing.md`。
 - **落盘不变量 A**：有讲义文本才调 add-node。详见 `references/persistence.md`。
-- **落盘不变量 B**：探查每题必须 write-state 覆盖 `last_probe`。详见 `references/persistence.md`。
+- **落盘不变量 B**：探查首问不落盘；用户答题后的补问 / 终态轮才 write-state 覆盖 `last_probe`。详见 `references/persistence.md`。
 - **Bash 后零文本**：`write-state` / `add-*` 之后结束本轮。详见 `references/persistence.md`。
 - **主流程合法 Bash**：`write-state`、`add-topic`、`add-node`、`add-mistake`、`compute-sm2`。初始化由插件自动完成，主流程不要调用 `stubborn-coach init`。详见 `references/persistence.md`。
 

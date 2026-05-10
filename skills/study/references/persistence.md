@@ -38,6 +38,8 @@ topics:
     last_probe: {}
 ```
 
+`write-state` 只接受完整 YAML stdin。禁止 `--path`、`--patch`、JSON patch、key=value、文件路径参数；需要改任何字段时，先在脑中合成完整 `.study-state.yml`，再用 heredoc 全量覆盖。
+
 **add-topic**（markdown，首行是标题，必须包含节点 1 讲义）：
 ```markdown
 主题标题（纯文本，不带 #）
@@ -71,7 +73,7 @@ topics:
 
 **A — 教学与落盘原子**：本轮文本里输出了节点 N 的稳定讲义段（`##### N. {label}` 起头，非临时补讲），就必须紧接着 `add-node --idx N`（节点 1 由 `add-topic` 一并带入）。反向也成立——没有讲义文本就**绝不**调 add-node。CLI 现在用 state.yml 反向校验 done[N-1]=true，错调 add-node 会被 `NODE_PREREQUISITE_NOT_DONE` 拒。
 
-**B — 探查每题落 state**：`in_progress` 首问 / 补问 / 用户答完后的轮，都必须 `write-state` 覆盖 `last_probe`（含 verdict、ledger、actions_used、current_question、question_count），并按 Probe 轮形态同步 done / current_node_idx / SM-2。这样用户中途关掉，下次进入立刻能 T-Resume。
+**B — 有答题证据才落 state**：探查首问（T-Open）只输出问题，**零 Bash**，不写 `last_probe`。用户答题后的补问轮 / 终态轮才必须 `write-state` 覆盖 `last_probe`（含 verdict、ledger、actions_used、current_question、question_count），并按 Probe 轮形态同步 done / current_node_idx / SM-2。没有用户答案就没有学习证据；首问丢失时重新出题即可。
 
 A 与 B 满足就不需要"对账"或"补齐缺失节点"——所有写入都在事件发生当轮完成。
 
@@ -92,7 +94,9 @@ A 与 B 满足就不需要"对账"或"补齐缺失节点"——所有写入都�
 | 创建 topic（Step 0 后首轮） | A + B 不触发，但 topic 骨架本身要落盘 | `write-state`（追加 topics、设 current_topic、map、`current_node_idx=1`）→ `add-topic --id <id>`（节点 1 讲义随骨架进入） |
 | 教完节点正文输出"节点出口提示"结束（用户**未说**"检查一下"） | 都不触发 | **零 Bash**——`current_node_idx` / `done` / study.md 都不动 |
 | 输出节点 N（N≥2）教学正文（**仅由 P1 触发**） | A | `write-state` → `add-node --idx N`（CLI 校验 done[N-1]=true） |
-| 探查任意一轮（首问 T-Open / 补问 T-Step / 用户答完进入终态 T-Close） | B | P4 终态额外先调 `compute-sm2`；所有轮 `write-state` 覆盖 `last_probe`（含 verdict、ledger、actions_used、current_question、question_count）；终态轮再按 P1-P5 同步 done/idx/SM-2 |
+| 探查首问 T-Open（用户刚说"检查一下"，尚未答题） | 都不触发 | **零 Bash**——只输出问题，不写 `last_probe` |
+| 探查答题后仍需追问（T-Step） | B | `write-state` 覆盖 `last_probe.verdict=in_progress`，保存已答证据和本轮新问题 `current_question` |
+| 探查答题后进入终态（T-Close / P1-P5） | B | P4 终态额外先调 `compute-sm2`；`write-state` 覆盖终态 `last_probe` 并按 P1-P5 同步 done/idx/SM-2；必要时再 `add-node` / `add-mistake` |
 | 切 topic / 暂停保存 | 仅 B 类的 state 维护 | `write-state`，不动 study.md |
 
 ## study.md 内容约束

@@ -94,6 +94,7 @@ source:
 - 使用简体中文；只在必要时保留原文专有名词、代码标识符、公式或短标题
 - 一句一个事实/原理，不串句
 - 避免直接抄原文（Feynman 原则：用自己的话）
+- 保持为事实性学习点，不要新增 `node_type`、`claim/evidence/limitation` 等结构字段，也不要把 key_points 写成讲解模板；主流程会根据 key_points 内容选择普通讲法或证据 / 边界讲法
 
 ### Citation
 

@@ -2,6 +2,8 @@
 
 主流程在用户说"检查一下"、"现在小测"、"复习"时进入探查循环。探查不是额外教学，而是用最少轮次收集足够证据，决定继续、补讲或重讲。本文件定义完整的探查协议：作用域预算、证据账本、动作库、选题策略、轮形态（T-Open / T-Step / T-Resume / T-Close）、终态模板 P1-P5、rubric 与 last_probe schema。
 
+首问不落盘：用户刚说"检查一下"时，只输出第一题，不调用 Bash、不写 `last_probe`。只有用户答题后，才根据证据写 `last_probe`（追问时写 `in_progress`，终态时写 `pass|partial|fail`）。没有用户答案就没有学习证据，首问丢失时重新出题即可。
+
 IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用之一作为证据；"懂了 / 我会了 / 继续"不构成证据。`mastered` 节点单题不足以构成过线证据——必须 ≥2 次不同动作才有机会同时覆盖到 applied 或 discriminated 维度。
 
 ## 探查初始化（每轮探查的前置步骤）
@@ -14,7 +16,7 @@ IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用�
 4. 按闭合条件确定本轮 `target_depth`（镜像 topic 的 `target_depth`）。
 5. 按选题策略设计第一题（优先覆盖最多 untested key_points 的综合题）。
 
-初始化完成后才出第一题。
+初始化完成后才出第一题。T-Open 的初始化只发生在本轮上下文中，不写入 `.study-state.yml`。
 
 ## 作用域与预算
 
@@ -72,6 +74,12 @@ IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用�
 
 在这套策略下，5 个 key_points 的节点理想路径是：**T1 综合题（targets 覆盖 3-4 点，落账后多数变 ok）→ T2-T3 定向追问剩余 weak/untested 点 → T-Close**。一题答得好就 pass 是漏测，但 6 题才 pass 也是题目设计太单薄。
 
+### 证据 / 边界节点的探查
+
+如果当前节点的 key_points 主要是实验设置、结果数字、baseline 对比、消融、鲁棒性、失败现象或适用边界，不要用“复述数字 / 复述结论”判通过。首问优先要求用户解释：这些结果支持了哪个主张、为什么算支持、还不能证明什么或在哪些条件下会失效。
+
+对这类节点，`familiar` 通过至少需要用户主动说出一个“结果 → 主张”的连接，并说出一个边界 / 局限 / 不能证明的点。用户只记住成功率、SOTA 或“效果很好”，最多算 weak，不能 pass。
+
 ### 动作 × 维度 × 题型 速查
 
 每轮选**信息量最高**的动作——优先补 untested/missing，其次补 weak。同一探查内不重复使用同一动作（minimal_hint 在卡住后追问中可复用）。
@@ -88,22 +96,22 @@ IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用�
 
 ## 轮形态（状态机一步）
 
-每轮 4 个动作：(1) 更新账本（仅当本轮有用户答题）→ (2) 判定状态 → (3) 生成本轮文本 → (4) 落盘。
+有用户答题的轮执行 4 个动作：(1) 更新账本 → (2) 判定状态 → (3) 生成本轮文本 → (4) 落盘。T-Open 首问轮没有用户答题，只输出问题并结束本轮。
 
-**T-Open（首问轮）** — `verdict` 从无到 `in_progress`：
+**T-Open（首问轮）** — 用户刚触发探查，还没有答题证据：
 
-文本：1 题，按选题策略挑（首轮通常是覆盖最多 untested key_points 的 `probe_core`）。不带反馈、不带菜单。
-落盘：`write-state` 写 `last_probe { scope, verdict: in_progress, target_depth, evidence_ledger { key_points_status: 全 untested, accurate/explained/applied/discriminated: 全 missing }, actions_used: [本题动作], current_question: { action, text, targets: [本题指向的 key_point idx], asked_at }, question_count: 1, probed_at }`。
+文本：1 题，按选题策略挑（首轮通常是覆盖最多 untested key_points 的 `probe_core`）。不带反馈、不带菜单，不暴露"按某类节点规则设计题目"之类内部判断。
+落盘：**零 Bash**。不要调用 `write-state`，不要写 `last_probe`，不要构造 `current_question`。如果用户在回答前中断，下次重新 T-Open 出题。
 
-**T-Step（补问轮）** — `verdict` 保持 `in_progress`：
+**T-Step（补问轮）** — 用户已回答上一题，但证据还不够，需要继续问：
 
 文本顺序：(a) 一句反馈上一题（点出 confirmed key_point 或仍 weak 的地方，不剧透下一题在测哪一维）；(b) 1 道新题，按选题策略优先覆盖 untested key_point。
-落盘：`write-state` 更新 `key_points_status`（按上一题表现把 `targets` 中的 key_point 推到 ok/weak）+ 4 维深度账本 + actions_used + current_question + question_count；`confirmed_points / misconceptions / open_gaps` 增量累积。
+落盘：`write-state` 写完整 state，覆盖 `last_probe.verdict=in_progress`。其中 `key_points_status` 和 4 维深度账本基于用户刚刚的回答更新；`actions_used` 记录已用动作；`current_question` 写本轮新问的问题；`question_count` 从已回答题数 + 新问题计数累积；`confirmed_points / misconceptions / open_gaps` 增量累积。
 
 **T-Resume（恢复轮）** — 用户隔轮回来，state 里 `verdict == in_progress`：
 
 文本顺序：(a) 一句"刚才在 节点 N 探查到一半，已覆盖 [actions_used 对应维度]，还想确认 [ledger 中 missing/weak 的维度]"；(b) 重新呈现 `current_question.text`（用户可能忘了），或如果用户已经在本轮直接给出答案就跳过 (b)，按 T-Step 处理。
-落盘：仅恢复语境时不写盘；用户已答时按 T-Step 写盘。
+落盘：仅恢复语境时不写盘；用户已答时按 T-Step 写盘。若 state 没有 `last_probe.verdict == in_progress`，但用户像是在回答上一题，无法可靠归属；请提示用户说"检查一下"，重新出一题，不要猜测并落盘。
 
 **T-Close（终态轮）** — 账本闭合或预算耗尽，进入 P1-P5 之一（见下方）。终态轮的反馈段同时是上一题的反馈，**不要在 T-Step 之后再单独跑 P1**。
 
@@ -120,14 +128,15 @@ IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用�
 
 #### P2：node-scope pass，但已是最后节点（发起最终挑战）
 
-最终挑战本质是 topic-scope 探查的开端，复用 in_progress 状态机：
+最终挑战本质是 topic-scope 探查的开端，首问同样不落 `current_question`：
 文本：(1) 精简告知节点已学完 → (2) 1 道跨节点综合题作为最终挑战首问。
-落盘：`write-state`（done[max]=true、`current_node_idx=max+1`、`status: in_progress` 保持、`last_probe` 重置为 `{ scope: topic, verdict: in_progress, ledger 全 missing, actions_used: [本题动作], current_question: 挑战题 }`）。**不调 add-node。**
+落盘：`write-state`（done[max]=true、`current_node_idx=max+1`、`status: in_progress` 保持、`last_probe.current_question=null`，可保留刚通过的节点终态摘要或清空）。**不调 add-node。** 如果用户在回答最终挑战前中断，下次 P3 重新出一道最终挑战题。
 
 #### P3：最终挑战恢复（`current_node_idx == max+1` 且 `status: in_progress`）
 
 由 routing 表的 P-Final-Resume 触发：
 - 若 `last_probe.verdict == in_progress`：按 T-Resume 重现挑战题；用户答完后按 T-Step / T-Close 演进。
+- 若没有 `last_probe.verdict == in_progress`：按 topic-scope T-Open 重新出一道最终挑战题，首问不落盘。
 - 若 `verdict` 已是终态但收尾未做完：按对应 P4/P5 收尾。
 
 #### P4：topic-scope / review-scope pass
@@ -163,7 +172,7 @@ IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用�
 
 `verdict` 取值：
 
-- `in_progress` — 探查未结束，当轮已落盘。
+- `in_progress` — 用户已经答过至少一题，证据仍不足，且本轮已落盘保存下一题。
 - `pass` — 达到当前 `target_depth` 门槛，关键误解未复现。
 - `partial` — 主干接近，缺一个关键链条或依赖提示，或轻微误解仍需修补。
 - `fail` — 出现阻断后续学习的核心误解，或多数关键点没有证据。
@@ -204,7 +213,7 @@ last_probe:
     applied: missing
     discriminated: missing
   actions_used: [probe_core, socratic_followup]   # 时间累积，不去重
-  current_question:                      # in_progress 时必写；终态时清空（null）
+  current_question:                      # in_progress 时必写下一题；终态时清空（null）
     action: application_transfer
     text: 在 [新场景] 下要怎么用 X？
     targets: [3]                         # 本题指向的 key_point idx 列表
@@ -221,4 +230,4 @@ last_probe:
   probed_at: 2026-05-06
 ```
 
-`last_probe` 非终态时也每轮覆盖；用户中途离开，下次 T-Resume 直接读它即可恢复语境。长期误解仍写入 `topics[].misconceptions` 并追加去重。
+`last_probe` 只在用户答题后的轮写入。T-Open 首问不写 `last_probe`；非终态追问轮写 `in_progress`，用户中途离开后可 T-Resume。长期误解仍写入 `topics[].misconceptions` 并追加去重。
