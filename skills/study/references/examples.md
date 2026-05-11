@@ -12,8 +12,6 @@
 [M] mastered — 还要能在新场景下推导/应用
 ```
 
-**Step 0 轮边界**：深度问询是**独立一轮**，输出上面三行（可加一句对 source 的一句话概述）后立刻结束；**禁止**在同一轮追加学习地图、节点 1 正文或 `add-topic`。长 PDF / 长 URL 入口也适用——subagent 返回 `source_summary` 后本轮只走 Step 0。落盘在 Step 0 轮**不发生**（state 仍为自动初始化模板，`add-topic` 等用户回 F/M 后的"First-Round Output"轮才调）。
-
 ### First-Round Output（Step 0 后的首轮）
 
 1. 学习地图 3-5 节点（mastered 偏 5 节点且含推导/应用节点）。
@@ -23,10 +21,6 @@
 5. 结束本轮，不追加菜单、数字选项、"等你回答"。
 
 创建 topic 时，state 必须写 `current_node_idx: 1`，且 `map[]` 每个节点都有本节点 `key_points`。节点 2 起只输出教学正文 + 同一条节点出口提示，不重复元控制提示。
-
-### 节点边界
-
-只讲当前节点 key_points；不展开后续节点才说得清的机制，只用一句 `（具体机制在节点 N 展开）` 预告。节点 1 宁少不超载，先建立最小可工作直觉。
 
 ### 节点讲法
 
@@ -142,22 +136,6 @@ map:
       - 少量质量对应巨大能量
 ```
 
-### 用户继续追问当前节点
-
-```
-为什么说静止物体也有能量？
-```
-
-主流程继续解释当前节点，不进入探查、不翻 done、通常不落盘：
-
-```
-这里的"静止"只是不包含运动能量。E=mc² 说的是物体光是因为有质量，就已经对应一份静止能量。
-
-你可以把它理解成：质量不是能量之外的东西，而是能量的一种储存方式。运动能量只是额外加上去的一层。
-
-这个节点先讲到这里。你可以继续追问这个节点；如果觉得差不多了，说"检查一下"，我会用一个短问答确认能不能进入下一节点。
-```
-
 ### 用户准备验证
 
 ```
@@ -188,7 +166,7 @@ map:
 下一步进入节点 2：c² 为什么让少量质量对应巨大能量。
 ```
 
-随后用 `write-state` 落盘：`last_probe.verdict=pass`、节点 1 `done=true`、`current_node_idx=2`、progress 改成 `1/4`；再用 `add-node --topic e-mc2 --idx 2` 追加节点 2 讲义。Bash 完成后不补充文字。`last_probe` 结构示例：
+随后用 `write-state` 落盘：`last_probe.verdict=pass`、节点 1 `done=true`、`current_node_idx=2`、progress 改成 `1/4`；再用 `add-node --topic e-mc2 --idx 2` 追加节点 2 讲义。Bash 完成后不补充文字。**write-state 须传含 `topics:` 数组的完整 YAML（见 persistence.md），以下仅为字段变化示意：**
 
 ```yaml
 last_probe:
@@ -226,7 +204,7 @@ last_probe:
 下一轮我会换一个更小的例子讲：为什么一个没有发生反应的静止物体，仍然有 E=mc² 对应的静止能量。
 ```
 
-随后仍然必须用 `write-state` 保存失败状态；节点 1 `done=false`，`current_node_idx` 仍为 1；再用 `add-mistake --topic e-mc2 --node 1` 追加本轮新增错题：
+随后仍然必须用 `write-state` 保存失败状态；节点 1 `done=false`，`current_node_idx` 仍为 1；再用 `add-mistake --topic e-mc2 --node 1` 追加本轮新增错题。**write-state 须传含 `topics:` 数组的完整 YAML（见 persistence.md）；`current_node_idx` 等字段在 `topics[].` 内部，不是根级字段；以下仅为字段变化示意：**
 
 ```yaml
 current_node_idx: 1
@@ -314,3 +292,9 @@ budget:
 ### 反例 F：用 Write/Edit/MultiEdit 写文件
 
 这些工具会在终端渲染 diff。必须用 `stubborn-coach write-state` / `add-topic` / `add-node` / `add-mistake` 的 heredoc 命令。
+
+### 反例 G：PDF 入口绕过 SOURCE GATE
+
+用户输入 `/stubborn-coach:study @paper.pdf`，主流程直接 `Read` PDF，返回空后改调 generic subagent 摘要并开始教学。
+
+错误：违反 SOURCE GATE。唯一合法路径：用 **Task 工具**（`subagent_type: "stubborn-coach:source-ingest"`）调用 source-ingest subagent → 拿到 `source_summary` → 进入 Step 0；失败则中文报告并停止。禁止用 Skill 工具调用，`source-ingest` 是 Agent 不是 Skill。

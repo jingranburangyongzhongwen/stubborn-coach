@@ -10,6 +10,8 @@ LANGUAGE LAW: 所有面向用户的教学、测验、状态摘要、报告、落
 
 IRON LAW: 节点过线必须基于用户主动给出的解释 / 例子 / 应用之一作为证据；"懂了 / 我会了 / 继续"不构成证据。`mastered` 节点单题不构成过线证据——必须用至少两个不同动作覆盖到 `applied` 或 `discriminated` 维度，详见 `references/probing.md` 证据账本。
 
+SOURCE GATE: 用户输入包含 PDF / DOCX / PPTX / XLSX / 图片 / PDF URL 时，本轮**唯一合法动作**是用 **Task 工具**（`subagent_type: "stubborn-coach:source-ingest"`）调用 source-ingest subagent；未拿到 `source_summary` 前禁止输出论文摘要、学习地图或 Step 0。失败时用中文报告并停止，不换工具、不降级 `Read`。
+
 `/stubborn-coach:study` 是唯一公开入口，覆盖学习、复习、测验、查询、状态、导出。用户知识库在 `learning-wiki/study.md`，机器状态在 `learning-wiki/.study-state.yml`。
 
 natural triggers：`学习`、`教我`、`我想读懂`、`帮我理解`、`继续`、`复习`、`到期复习`、`考考我`、`小测一下`、`X 是什么`、`在 wiki 找`、`我学得怎么样`、`现在到哪了`、`这句话来自哪里`、`来源`、`出处`、`导出报告`、`总结一下`、`teach me`、`I want to learn`、`quiz me`、`review`、`status`、`how am I doing`。
@@ -20,7 +22,7 @@ state 的 `last_probe.verdict == in_progress` 优先级最高：任何"继续 / 
 
 | 用户输入 | 分支 |
 |---|---|
-| 带 topic 名 / URL / 本地文件 / PDF / 粘贴文本 | **先 Read `references/examples.md`**，再进入教学循环。入口处理见 `references/persistence.md` SOURCE-FILES LAW |
+| 带 topic 名 / URL / 本地文件 / PDF / 粘贴文本 | **先 Read `references/examples.md`**，再进入教学循环（PDF/二进制源须先过 SOURCE GATE） |
 | 无参数 | 今日入口：探查未完成 → **Read `references/probing.md`** 后 T-Resume；有 due → 复习；否则继续 `current_topic` / 最近 `in_progress`；都没有则给状态摘要 |
 | `继续` | 探查未完成 → **Read `references/probing.md`** 后 T-Resume；最终挑战未答 → P-Final-Resume；否则继续 `current_topic` 当前节点；没有 `current_topic` 时按今日入口 |
 | `检查一下` / `我懂了` / `继续下一节点` | **先 Read `references/probing.md`**，再进入或继续当前节点探查（首问或补问） |
@@ -34,7 +36,8 @@ state 的 `last_probe.verdict == in_progress` 优先级最高：任何"继续 / 
 |---|---|
 | topic 名 | 主流程生成 3-5 节点学习地图，立即开讲，不调 subagent |
 | 短 URL（< 5000 字） | 主流程 WebFetch + 摘要 |
-| 长 URL / 长 PDF / 长粘贴 | 调 `stubborn-coach:source-ingest` subagent，消化 `source_summary` 后进入 Step 0 深度问询 |
+| **PDF / DOCX / PPTX / XLSX / 图片 / PDF URL** | **SOURCE GATE**：只允许用 **Task 工具**（`subagent_type: "stubborn-coach:source-ingest"`）调用 source-ingest subagent；拿到 `source_summary` 后才进入 Step 0；失败即停止 |
+| 长 URL / 长粘贴文本 | 用 **Task 工具**（`subagent_type: "stubborn-coach:source-ingest"`）调 source-ingest subagent，消化 `source_summary` 后进入 Step 0 深度问询 |
 | 本地短 `.md` / `.txt` / 短粘贴 | 主流程 Read |
 
 纯 topic 首轮禁用 WebSearch、WebFetch、`stubborn-coach:source-ingest` 与探查循环；直接 Read 两个学习文件（缺失会自动初始化），只允许后续用 `write-state`、`add-topic` 落盘。主流程**不要**调用 `stubborn-coach init`。

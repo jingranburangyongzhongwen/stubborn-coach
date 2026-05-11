@@ -38,7 +38,7 @@ topics:
     last_probe: {}
 ```
 
-`write-state` 只接受完整 YAML stdin。禁止 `--path`、`--patch`、JSON patch、key=value、文件路径参数；需要改任何字段时，先在脑中合成完整 `.study-state.yml`，再用 heredoc 全量覆盖。
+`write-state` 只接受完整 YAML stdin。禁止 `--path`、`--patch`、JSON patch、key=value、文件路径参数；需要改任何字段时，先在脑中合成完整 `.study-state.yml`，再用 heredoc 全量覆盖。**严禁只传 topic 内部字段（如 `topic_id:` / `current_node_idx:` 裸字段）——CLI 会拒绝并返回 `INVALID_STATE_YAML: state YAML must contain topics`。**
 
 **add-topic**（markdown，首行是标题，必须包含节点 1 讲义）：
 ```markdown
